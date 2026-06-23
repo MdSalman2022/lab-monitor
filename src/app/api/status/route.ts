@@ -1,0 +1,15 @@
+import { getDashboardStatus } from "@/server/status";
+import { fail, ok } from "@/server/http";
+import { sampleGpuNow } from "@/server/gpu";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+export async function GET() {
+  try {
+    await sampleGpuNow().catch(() => null);
+    return ok(getDashboardStatus());
+  } catch (error) {
+    return fail(error);
+  }
+}

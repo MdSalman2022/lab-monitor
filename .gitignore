@@ -19,6 +19,13 @@
 
 # production
 /build
+/dist-worker
+
+# local LabBeacon runtime state
+/data/*.sqlite
+/data/*.sqlite-*
+/logs
+/backups
 
 # misc
 .DS_Store
