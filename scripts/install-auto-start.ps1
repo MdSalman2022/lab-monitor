@@ -1,6 +1,6 @@
 param(
   [string]$ProjectDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path,
-  [string]$TaskName = "LabManager"
+  [string]$ShortcutName = "LabManager"
 )
 
 $ErrorActionPreference = "Stop"
@@ -8,25 +8,27 @@ $scriptPath = Join-Path $PSScriptRoot "start-all.ps1"
 $logDir = Join-Path $ProjectDir "logs"
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
-$trigger = New-ScheduledTaskTrigger -AtStartup
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-$principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$startupDir = [Environment]::GetFolderPath("Startup")
+$shortcutPath = Join-Path $startupDir "$ShortcutName.lnk"
+$powershellPath = (Get-Command powershell).Source
+$arguments = '-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPath + '"'
 
-Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force
+$wshShell = New-Object -ComObject WScript.Shell
+$shortcut = $wshShell.CreateShortcut($shortcutPath)
+$shortcut.TargetPath = $powershellPath
+$shortcut.Arguments = $arguments
+$shortcut.WorkingDirectory = $ProjectDir
+$shortcut.IconLocation = "powershell.exe,0"
+$shortcut.Save()
 
-Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║  Lab Manager — Auto-start installed             ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════╝"
-Write-Host ""
-Write-Host "Task '$TaskName' registered." -ForegroundColor Green
-Write-Host "Auto-starts on boot as SYSTEM (even before login)."
+Write-Host "Startup shortcut installed" -ForegroundColor Green
+Write-Host "Shortcut: $shortcutPath"
+Write-Host "Runs when the current user logs in."
 Write-Host ""
 Write-Host "Logs: $logDir\startup.log"
 Write-Host "Tunnel URL: $ProjectDir\tunnel-url.txt"
 Write-Host ""
 Write-Host "Manual commands:" -ForegroundColor Yellow
-Write-Host "  Start:  Start-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  Stop:   Stop-ScheduledTask -TaskName '$TaskName'"
-Write-Host "  Status: Get-ScheduledTask -TaskName '$TaskName' | Get-ScheduledTaskInfo"
+Write-Host "  Start now:  powershell -ExecutionPolicy Bypass -File $scriptPath"
+Write-Host "  Remove:     Remove-Item -LiteralPath $shortcutPath"
 Write-Host ""
