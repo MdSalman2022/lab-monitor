@@ -1,4 +1,4 @@
-import type { LabBeaconDatabase } from "./db";
+import type { LabScheduleManagerDatabase } from "./db";
 import { getDb } from "./db";
 import { notFound, validationError } from "./errors";
 import { recordEvent } from "./events";
@@ -57,7 +57,7 @@ function isWithinSlot(minutes: number, start: number, end: number) {
   return minutes >= start || minutes < end;
 }
 
-export function listScheduleSlots(db: LabBeaconDatabase = getDb()) {
+export function listScheduleSlots(db: LabScheduleManagerDatabase = getDb()) {
   const rows = db
     .prepare(
       `
@@ -80,7 +80,7 @@ export function createScheduleSlot(
     startTime: string;
     endTime: string;
   },
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   timeToMinutes(input.startTime);
   timeToMinutes(input.endTime);
@@ -106,7 +106,7 @@ export function createScheduleSlot(
 
 export function getScheduleSlot(
   slotId: number,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const row = db
     .prepare(
@@ -128,7 +128,7 @@ export function getScheduleSlot(
 
 export function deleteScheduleSlot(
   slotId: number,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const now = new Date().toISOString();
   const result = db
@@ -155,7 +155,7 @@ export function updateScheduleSlot(
     endTime: string;
     isActive: boolean;
   }>,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const current = getScheduleSlot(slotId, db);
   const next = {
@@ -199,7 +199,7 @@ export function updateScheduleSlot(
 
 export function getCurrentScheduleSlot(
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const dayOfWeek = now.getDay();
   const minutes = now.getHours() * 60 + now.getMinutes();
@@ -228,7 +228,7 @@ export function getCurrentScheduleSlot(
 
 export function checkUnclaimedCurrentSlot(
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
   config: AppConfig = appConfig,
 ) {
   const currentSlot = getCurrentScheduleSlot(now, db);

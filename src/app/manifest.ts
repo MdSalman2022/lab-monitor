@@ -2,8 +2,8 @@ import type { MetadataRoute } from "next";
 
 export default function manifest(): MetadataRoute.Manifest {
   return {
-    name: "LabBeacon",
-    short_name: "LabBeacon",
+    name: "Lab Schedule Manager",
+    short_name: "Lab Schedule",
     description: "Shared GPU lab PC shift tracker",
     start_url: "/",
     scope: "/",

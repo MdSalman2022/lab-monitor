@@ -1,4 +1,4 @@
-import type { LabBeaconDatabase } from "./db";
+import type { LabScheduleManagerDatabase } from "./db";
 import { getDb } from "./db";
 
 export type EventType =
@@ -8,6 +8,7 @@ export type EventType =
   | "SESSION_INACTIVE"
   | "SESSION_NEEDS_CONFIRMATION"
   | "SESSION_CLAIMED"
+  | "SESSION_AUTO_RENEWED"
   | "SLOT_UNCLAIMED"
   | "TELEGRAM_TEST";
 
@@ -59,7 +60,7 @@ function mapEvent(row: EventRow): EventRecord {
   };
 }
 
-export function recordEvent(input: EventInput, db: LabBeaconDatabase = getDb()) {
+export function recordEvent(input: EventInput, db: LabScheduleManagerDatabase = getDb()) {
   const createdAt = new Date().toISOString();
   const metadata =
     input.metadata === undefined ? null : JSON.stringify(input.metadata);
@@ -93,7 +94,7 @@ export function recordEvent(input: EventInput, db: LabBeaconDatabase = getDb()) 
 
 export function listRecentEvents(
   limit = 20,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const rows = db
     .prepare(

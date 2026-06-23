@@ -1,5 +1,7 @@
 "use client";
 
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import type { CSSProperties } from "react";
 import {
   Activity,
@@ -9,26 +11,22 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
-  Cpu,
   Database,
-  Gauge,
-  HardDrive,
   LogOut,
   PencilLine,
   Radio,
   RefreshCw,
   Signal,
   Trash2,
+  UserPlus,
   WifiOff,
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
 
 type UserRecord = {
   id: number;
   name: string;
-  telegramTag: string | null;
   isActive: boolean;
 };
 
@@ -70,11 +68,43 @@ type GpuSample = {
   source: string;
 };
 
+type GpuProcessSample = {
+  pid: number;
+  processName: string;
+  commandLine: string | null;
+  usedMemoryMb: number;
+  isPython: boolean;
+  isLikelyMl: boolean;
+  reason: "ml_keyword" | "python_gpu_memory" | "not_ml_process";
+  sampledAt: string;
+  source: string;
+};
+
+type GpuDayPoint = {
+  bucketStart: string;
+  gpuUtil: number | null;
+  memoryPercent: number | null;
+  mlPercent: number;
+};
+
+type GpuWeeklyPoint = {
+  date: string;
+  gpuAverage: number | null;
+  gpuPeak: number | null;
+  memoryAverage: number | null;
+  mlPercent: number;
+  sampleCount: number;
+  mlBucketCount: number;
+  bucketCount: number;
+};
+
 type StatusResponse = {
   now: string;
   config: {
     checkinIntervalMinutes: number;
     graceMinutes: number;
+    confirmationWarningMinutes: number;
+    confirmationDangerMinutes: number;
     gpuIdleThreshold: number;
     gpuIdleWindowMinutes: number;
     gpuBusyMinActiveRatio: number;
@@ -86,6 +116,8 @@ type StatusResponse = {
   gpu: {
     latest: GpuSample | null;
     recent: GpuSample[];
+    day: GpuDayPoint[];
+    weekly: GpuWeeklyPoint[];
     average: {
       averageUtil: number | null;
       sampleCount: number;
@@ -103,6 +135,16 @@ type StatusResponse = {
       isSustained: boolean;
       hasBurstOnly: boolean;
     };
+    processActivity: {
+      windowMinutes: number;
+      processCount: number;
+      pythonProcessCount: number;
+      likelyMlProcessCount: number;
+      totalUsedMemoryMb: number;
+      likelyMlUsedMemoryMb: number;
+      isLikelyMlWorkload: boolean;
+      processes: GpuProcessSample[];
+    };
     isIdle: boolean | null;
   };
   schedule: {
@@ -116,7 +158,7 @@ type StatusResponse = {
   events: EventRecord[];
 };
 
-type Panel = "operate" | "schedule" | "log";
+type Panel = "operate" | "log";
 type ConfirmationTone = "normal" | "warning" | "danger";
 
 const DAY_LABELS = [
@@ -138,8 +180,6 @@ const DAY_OPTIONS = [
   { value: 5, label: "Friday" },
 ];
 const REFRESH_MS = 3000;
-const ONE_HOUR_MS = 60 * 60_000;
-const TWO_HOURS_MS = 2 * 60 * 60_000;
 
 function classNames(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
@@ -158,19 +198,36 @@ function formatTime(value: string | null) {
     return "Not set";
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "Asia/Dhaka",
   }).format(new Date(value));
 }
 
 function formatDateTime(value: string) {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    timeZone: "Asia/Dhaka",
   }).format(new Date(value));
+}
+
+function formatWeekday(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    timeZone: "Asia/Dhaka",
+  }).format(new Date(`${value}T00:00:00`));
+}
+
+function formatShortDate(value: string) {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "Asia/Dhaka",
+  }).format(new Date(`${value}T00:00:00`));
 }
 
 function formatDuration(ms: number) {
@@ -213,16 +270,21 @@ function getConfirmationTone(
     dueInMs: number;
     isOverdue: boolean;
   } | null,
+  warningMinutes: number,
+  dangerMinutes: number,
 ): ConfirmationTone {
   if (!derived) {
     return "normal";
   }
 
-  if (derived.isOverdue || derived.dueInMs < ONE_HOUR_MS) {
+  if (
+    derived.isOverdue ||
+    derived.dueInMs < Math.max(0, dangerMinutes) * 60_000
+  ) {
     return "danger";
   }
 
-  if (derived.dueInMs < TWO_HOURS_MS) {
+  if (derived.dueInMs < Math.max(0, warningMinutes) * 60_000) {
     return "warning";
   }
 
@@ -264,8 +326,11 @@ export function Dashboard() {
     dayOfWeek: number;
     slotId: number | null;
   } | null>(null);
+  const [selectedClaimUserId, setSelectedClaimUserId] = useState("");
   const [editingUserId, setEditingUserId] = useState<number | null>(null);
-  const [userForm, setUserForm] = useState({ name: "", telegramTag: "" });
+  const [userForm, setUserForm] = useState({ name: "" });
+  const [newUserName, setNewUserName] = useState("");
+  const [isAddingUser, setIsAddingUser] = useState(false);
   const [lastUpdatedAt, setLastUpdatedAt] = useState<number | null>(null);
   const [clientNow, setClientNow] = useState(() => Date.now());
 
@@ -274,6 +339,18 @@ export function Dashboard() {
       const nextStatus = await requestJson<StatusResponse>("/api/status", {
         cache: "no-store",
       });
+      setSelectedClaimUserId((current) => {
+        if (
+          current &&
+          nextStatus.users.some((user) => String(user.id) === current)
+        ) {
+          return current;
+        }
+
+        return String(
+          nextStatus.schedule.current?.userId ?? nextStatus.users[0]?.id ?? "",
+        );
+      });
       setStatus(nextStatus);
       setError(null);
       setLastUpdatedAt(Date.now());
@@ -281,7 +358,7 @@ export function Dashboard() {
       setError(
         requestError instanceof Error
           ? requestError.message
-          : "Could not load LabBeacon status",
+          : "Could not load Lab Schedule Manager status",
       );
     }
   }, []);
@@ -378,6 +455,18 @@ export function Dashboard() {
       }),
     );
   };
+  const handleClaim = () => {
+    if (!selectedClaimUserId) {
+      return;
+    }
+
+    void runAction(`claim-${selectedClaimUserId}`, () =>
+      requestJson("/api/sessions/claim", {
+        method: "POST",
+        body: JSON.stringify({ userId: Number(selectedClaimUserId) }),
+      }),
+    );
+  };
   const chooseScheduleDay = (dayOfWeek: number) => {
     setScheduleSelection({ dayOfWeek, slotId: null });
   };
@@ -409,7 +498,6 @@ export function Dashboard() {
     setEditingUserId(user.id);
     setUserForm({
       name: user.name,
-      telegramTag: user.telegramTag ?? "",
     });
   };
   const submitUser = () => {
@@ -423,10 +511,24 @@ export function Dashboard() {
         body: JSON.stringify({
           id: editingUserId,
           name: userForm.name,
-          telegramTag: userForm.telegramTag,
         }),
       });
       setEditingUserId(null);
+    });
+  };
+  const submitNewUser = () => {
+    const trimmed = newUserName.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    void runAction("user-create", async () => {
+      await requestJson("/api/users", {
+        method: "POST",
+        body: JSON.stringify({ name: trimmed }),
+      });
+      setNewUserName("");
+      setIsAddingUser(false);
     });
   };
 
@@ -434,8 +536,8 @@ export function Dashboard() {
     <main className="lb-shell">
       <section className="lb-topbar">
         <div>
-          <p className="lb-kicker">LabBeacon</p>
-          <h1 className="lb-title">Lab GPU status</h1>
+          <p className="lb-kicker">Lab Schedule Manager</p>
+          <h1 className="lb-title">Lab Available status</h1>
           <p className="lb-subtitle">
             Live GPU load, sustained activity, check-ins, and shift handoff for
             one shared machine.
@@ -474,7 +576,48 @@ export function Dashboard() {
         </div>
       ) : null}
 
-      <section className="lb-telemetry-grid" aria-label="Live telemetry">
+      <section className="lb-command-grid" aria-label="Shift and schedule">
+        <SchedulePanel
+          slots={status.schedule.slots}
+          users={status.users}
+          current={status.schedule.current}
+          selection={scheduleSelection}
+          busyAction={busyAction}
+          onChooseDay={chooseScheduleDay}
+          onCancelEdit={() => {
+            setScheduleSelection(null);
+          }}
+          onAssign={assignScheduleDay}
+          onEdit={editScheduleSlot}
+          onDelete={(id) =>
+            void runAction(`delete-slot-${id}`, () =>
+              requestJson("/api/schedule", {
+                method: "DELETE",
+                body: JSON.stringify({ id }),
+              }),
+            )
+          }
+        />
+
+        <SessionHero
+          session={openSession}
+          derived={derived}
+          currentSlot={status.schedule.current}
+          checkinIntervalMinutes={status.config.checkinIntervalMinutes}
+          confirmationWarningMinutes={status.config.confirmationWarningMinutes}
+          confirmationDangerMinutes={status.config.confirmationDangerMinutes}
+          users={status.users}
+          selectedClaimUserId={selectedClaimUserId}
+          busyAction={busyAction}
+          isMlRunning={status.gpu.processActivity.isLikelyMlWorkload}
+          onClaim={handleClaim}
+          onSelectedClaimUserIdChange={setSelectedClaimUserId}
+          onCheckIn={handleCheckIn}
+          onEnd={handleEnd}
+        />
+      </section>
+
+      <section className="lb-telemetry-grid" aria-label="Live telemetry and users">
         <TelemetryHero
           gpuUtil={gpuUtil}
           memoryPercent={memoryPercent}
@@ -485,17 +628,29 @@ export function Dashboard() {
           isGpuBusy={isGpuBusy}
           hasBurstOnly={hasBurstOnly}
           activity={status.gpu.activity}
-          recent={status.gpu.recent}
+          processActivity={status.gpu.processActivity}
+          day={status.gpu.day}
         />
 
-        <SessionHero
-          session={openSession}
-          derived={derived}
-          currentSlot={status.schedule.current}
-          checkinIntervalMinutes={status.config.checkinIntervalMinutes}
+        <OperatorPanel
+          users={status.users}
+          openSession={openSession}
           busyAction={busyAction}
-          onCheckIn={handleCheckIn}
-          onEnd={handleEnd}
+          editingUserId={editingUserId}
+          userForm={userForm}
+          setUserForm={setUserForm}
+          onEditUser={editUser}
+          onCancelEditUser={() => setEditingUserId(null)}
+          onSubmitUser={submitUser}
+          isAddingUser={isAddingUser}
+          newUserName={newUserName}
+          onNewUserNameChange={setNewUserName}
+          onStartAddUser={() => setIsAddingUser(true)}
+          onCancelAddUser={() => {
+            setIsAddingUser(false);
+            setNewUserName("");
+          }}
+          onSubmitNewUser={submitNewUser}
         />
       </section>
 
@@ -504,11 +659,6 @@ export function Dashboard() {
           active={activePanel === "operate"}
           label="Operate"
           onClick={() => setActivePanel("operate")}
-        />
-        <PanelButton
-          active={activePanel === "schedule"}
-          label="Schedule"
-          onClick={() => setActivePanel("schedule")}
         />
         <PanelButton
           active={activePanel === "log"}
@@ -524,56 +674,7 @@ export function Dashboard() {
             activePanel !== "operate" && "lb-mobile-hidden",
           )}
         >
-          <OperatorPanel
-            users={status.users}
-            openSession={openSession}
-            busyAction={busyAction}
-            editingUserId={editingUserId}
-            userForm={userForm}
-            setUserForm={setUserForm}
-            onEditUser={editUser}
-            onCancelEditUser={() => setEditingUserId(null)}
-            onSubmitUser={submitUser}
-            onStart={(userId) =>
-              void runAction(`start-${userId}`, () =>
-                requestJson("/api/sessions/claim", {
-                  method: "POST",
-                  body: JSON.stringify({ userId }),
-                }),
-              )
-            }
-          />
-
           <TodayPanel sessions={status.today.sessions} />
-        </div>
-
-        <div
-          className={classNames(
-            "lb-panel-stack",
-            activePanel !== "schedule" && "lb-mobile-hidden",
-          )}
-        >
-          <SchedulePanel
-            slots={status.schedule.slots}
-            users={status.users}
-            current={status.schedule.current}
-            selection={scheduleSelection}
-            busyAction={busyAction}
-            onChooseDay={chooseScheduleDay}
-            onCancelEdit={() => {
-              setScheduleSelection(null);
-            }}
-            onAssign={assignScheduleDay}
-            onEdit={editScheduleSlot}
-            onDelete={(id) =>
-              void runAction(`delete-slot-${id}`, () =>
-                requestJson("/api/schedule", {
-                  method: "DELETE",
-                  body: JSON.stringify({ id }),
-                }),
-              )
-            }
-          />
         </div>
 
         <div
@@ -583,6 +684,14 @@ export function Dashboard() {
           )}
         >
           <EventsPanel events={status.events} />
+        </div>
+
+        <div
+          className={classNames(
+            "lb-panel-stack",
+            activePanel !== "log" && "lb-mobile-hidden",
+          )}
+        >
           <SystemPanel
             pollSeconds={status.config.pollSeconds}
             threshold={status.config.gpuIdleThreshold}
@@ -590,11 +699,35 @@ export function Dashboard() {
             activeRatio={status.config.gpuBusyMinActiveRatio}
             consecutiveSamples={status.config.gpuBusyMinConsecutiveSamples}
             activity={status.gpu.activity}
+            processActivity={status.gpu.processActivity}
             lastUpdateAge={lastUpdateAge}
             sampleAgeMs={sampleAgeMs}
           />
         </div>
       </section>
+
+      <WeeklyOverviewPanel weekly={status.gpu.weekly} />
+
+      {scheduleSelection ? createPortal(
+        <SchedulePickerModal
+          users={status.users}
+          busyAction={busyAction}
+          isChanging={scheduleSelection.slotId !== null}
+          onAssign={assignScheduleDay}
+          onCancel={() => setScheduleSelection(null)}
+          onSubmitNewUser={async (name) => {
+            const result = await requestJson<{ user: UserRecord }>(
+              "/api/users",
+              {
+                method: "POST",
+                body: JSON.stringify({ name }),
+              },
+            );
+            assignScheduleDay(result.user.id);
+          }}
+        />,
+        document.body,
+      ) : null}
     </main>
   );
 }
@@ -607,7 +740,7 @@ function LoadingState() {
           <Radio className="h-5 w-5 animate-pulse" aria-hidden="true" />
         </div>
         <div>
-          <p className="lb-kicker">LabBeacon</p>
+          <p className="lb-kicker">Lab Schedule Manager</p>
           <h1 className="lb-loading-title">Waking the dashboard</h1>
           <p className="lb-muted">Preparing the live GPU control surface.</p>
         </div>
@@ -626,7 +759,8 @@ function TelemetryHero({
   isGpuBusy,
   hasBurstOnly,
   activity,
-  recent,
+  processActivity,
+  day,
 }: {
   gpuUtil: number;
   memoryPercent: number;
@@ -637,7 +771,8 @@ function TelemetryHero({
   isGpuBusy: boolean;
   hasBurstOnly: boolean;
   activity: StatusResponse["gpu"]["activity"];
-  recent: GpuSample[];
+  processActivity: StatusResponse["gpu"]["processActivity"];
+  day: GpuDayPoint[];
 }) {
   return (
     <article className="lb-hero-card lb-telemetry-card">
@@ -647,9 +782,17 @@ function TelemetryHero({
           <h2 className="lb-card-title">GPU and VRAM</h2>
         </div>
         <StatusPill
-          tone={isGpuBusy ? "success" : hasBurstOnly ? "warning" : "neutral"}
+          tone={
+            processActivity.isLikelyMlWorkload || isGpuBusy
+              ? "success"
+              : hasBurstOnly
+                ? "warning"
+                : "neutral"
+          }
           label={
-            isGpuBusy
+            processActivity.isLikelyMlWorkload
+              ? "ML/DL job detected"
+              : isGpuBusy
               ? "Sustained activity"
               : hasBurstOnly
                 ? "Short spike only"
@@ -658,41 +801,53 @@ function TelemetryHero({
         />
       </div>
 
-      <div className="lb-meter-grid">
-        <GaugeDial
-          label="GPU"
-          value={gpuUtil}
-          detail={`Avg ${averageUtil ?? "-"}% • ${activity.consecutiveActiveSamples} active samples in a row`}
-          icon={<Gauge className="h-5 w-5" aria-hidden="true" />}
-          tone="gpu"
+      <div className="lb-telemetry-stats">
+        <InfoItem label="GPU now" value={`${Math.round(clamp(gpuUtil))}%`} />
+        <InfoItem
+          label="10m GPU avg"
+          value={averageUtil === null ? "Waiting" : `${averageUtil}%`}
         />
-        <GaugeDial
-          label="VRAM"
-          value={memoryPercent}
-          detail={`${formatMemory(memoryUsed)} / ${memoryTotal ? formatMemory(memoryTotal) : "unknown"}`}
-          icon={<HardDrive className="h-5 w-5" aria-hidden="true" />}
-          tone="memory"
+        <InfoItem
+          label="VRAM now"
+          value={`${Math.round(clamp(memoryPercent))}%`}
+        />
+        <InfoItem
+          label="VRAM used"
+          value={`${formatMemory(memoryUsed)} / ${memoryTotal ? formatMemory(memoryTotal) : "unknown"}`}
+        />
+        <InfoItem
+          label="ML/DL signal"
+          value={
+            processActivity.isLikelyMlWorkload
+              ? `${processActivity.likelyMlProcessCount} process`
+              : "None"
+          }
         />
       </div>
 
       <div className="lb-telemetry-footer">
         <div className="lb-history-grid">
-          <UsageChart
+          <DayUsageChart
+            label="ML/DL"
+            tone="ml"
+            points={day}
+            getValue={(point) => point.mlPercent}
+            note="Likely ML/DL process share"
+          />
+          <DayUsageChart
             label="GPU"
             tone="gpu"
-            samples={recent}
-            getValue={(sample) => sample.gpuUtil}
+            points={day}
+            getValue={(point) => point.gpuUtil}
+            note={`${activity.threshold}% idle threshold`}
             threshold={activity.threshold}
           />
-          <UsageChart
+          <DayUsageChart
             label="VRAM"
             tone="memory"
-            samples={recent}
-            getValue={(sample) =>
-              sample.memoryTotalMb > 0
-                ? (sample.memoryUsedMb / sample.memoryTotalMb) * 100
-                : 0
-            }
+            points={day}
+            getValue={(point) => point.memoryPercent}
+            note="Memory pressure"
           />
         </div>
         <p className="lb-fineprint">
@@ -705,34 +860,60 @@ function TelemetryHero({
   );
 }
 
-function UsageChart({
+function DayUsageChart({
   label,
   tone,
-  samples,
+  points,
   getValue,
+  note,
   threshold,
 }: {
   label: string;
-  tone: "gpu" | "memory";
-  samples: GpuSample[];
-  getValue: (sample: GpuSample) => number;
+  tone: "gpu" | "memory" | "ml";
+  points: GpuDayPoint[];
+  getValue: (point: GpuDayPoint) => number | null;
+  note: string;
   threshold?: number;
 }) {
-  const visibleSamples = samples.slice(-42);
-  const latestValue =
-    visibleSamples.length > 0
-      ? Math.round(clamp(getValue(visibleSamples[visibleSamples.length - 1])))
-      : null;
+  const latestIndex = useMemo(() => {
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      if (getValue(points[index]) !== null) {
+        return index;
+      }
+    }
+
+    return points.length > 0 ? points.length - 1 : null;
+  }, [getValue, points]);
+  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const activeIndex =
+    hoverIndex !== null && points[hoverIndex]
+      ? hoverIndex
+      : selectedIndex !== null && points[selectedIndex]
+        ? selectedIndex
+        : latestIndex;
+  const activePoint = activeIndex === null ? null : points[activeIndex];
+  const activeValue = activePoint ? getValue(activePoint) : null;
+  const roundedActiveValue =
+    activeValue === null ? null : Math.round(clamp(activeValue));
 
   return (
     <div className={classNames("lb-usage-chart", `is-${tone}`)}>
       <div className="lb-usage-chart-head">
-        <span>{label}</span>
-        <strong>{latestValue === null ? "No data" : `${latestValue}%`}</strong>
+        <div>
+          <span>{label}</span>
+          <small>
+            {activePoint ? formatTime(activePoint.bucketStart) : "Today"}
+          </small>
+        </div>
+        <strong>
+          {roundedActiveValue === null ? "No data" : `${roundedActiveValue}%`}
+        </strong>
       </div>
       <div
         className="lb-sample-strip"
-        aria-label={`Recent ${label} usage samples`}
+        aria-label={`Today ${label} usage samples`}
+        onPointerLeave={() => setHoverIndex(null)}
       >
         {threshold !== undefined ? (
           <span
@@ -741,62 +922,43 @@ function UsageChart({
             aria-hidden="true"
           />
         ) : null}
-        {visibleSamples.length === 0 ? (
+        {points.length === 0 ? (
           <span className="lb-muted">Waiting for samples</span>
         ) : (
-          visibleSamples.map((sample) => {
-            const value = Math.round(clamp(getValue(sample)));
+          points.map((point, index) => {
+            const rawValue = getValue(point);
+            const value = rawValue === null ? 0 : Math.round(clamp(rawValue));
 
             return (
-              <span
-                key={`${label}-${sample.sampledAt}-${sample.gpuUtil}-${sample.memoryUsedMb}`}
-                className="lb-sample-bar"
+              <button
+                key={`${label}-${point.bucketStart}`}
+                type="button"
+                className={classNames(
+                  "lb-sample-bar",
+                  activeIndex === index && "is-selected",
+                  rawValue === null && "is-empty",
+                )}
                 style={pctStyle(value)}
-                title={`${label} ${value}% at ${formatTime(sample.sampledAt)}`}
+                onClick={() => setSelectedIndex(index)}
+                onPointerEnter={() => setHoverIndex(index)}
+                onFocus={() => setHoverIndex(index)}
+                onBlur={() => setHoverIndex(null)}
+                aria-label={
+                  rawValue === null
+                    ? `${label} no data at ${formatTime(point.bucketStart)}`
+                    : `${label} ${value}% at ${formatTime(point.bucketStart)}`
+                }
+                title={
+                  rawValue === null
+                    ? `${label} no data at ${formatTime(point.bucketStart)}`
+                    : `${label} ${value}% at ${formatTime(point.bucketStart)}`
+                }
               />
             );
           })
         )}
       </div>
-      {threshold !== undefined ? (
-        <p className="lb-chart-note">{threshold}% idle threshold</p>
-      ) : (
-        <p className="lb-chart-note">Memory pressure</p>
-      )}
-    </div>
-  );
-}
-
-function GaugeDial({
-  label,
-  value,
-  detail,
-  icon,
-  tone,
-}: {
-  label: string;
-  value: number;
-  detail: string;
-  icon: React.ReactNode;
-  tone: "gpu" | "memory";
-}) {
-  const rounded = Math.round(clamp(value));
-
-  return (
-    <div className={classNames("lb-gauge-card", `lb-gauge-${tone}`)}>
-      <div className="lb-gauge-ring" style={pctStyle(rounded)}>
-        <div className="lb-gauge-inner">
-          <span>{icon}</span>
-          <strong>{rounded}%</strong>
-        </div>
-      </div>
-      <div>
-        <p className="lb-gauge-label">{label}</p>
-        <p className="lb-muted">{detail}</p>
-        <span className="lb-gauge-progress" aria-hidden="true">
-          <span style={pctStyle(rounded)} />
-        </span>
-      </div>
+      <p className="lb-chart-note">{note}</p>
     </div>
   );
 }
@@ -806,7 +968,14 @@ function SessionHero({
   derived,
   currentSlot,
   checkinIntervalMinutes,
+  confirmationWarningMinutes,
+  confirmationDangerMinutes,
+  users,
+  selectedClaimUserId,
   busyAction,
+  isMlRunning,
+  onClaim,
+  onSelectedClaimUserIdChange,
   onCheckIn,
   onEnd,
 }: {
@@ -818,7 +987,14 @@ function SessionHero({
   } | null;
   currentSlot: ScheduleSlot | null;
   checkinIntervalMinutes: number;
+  confirmationWarningMinutes: number;
+  confirmationDangerMinutes: number;
+  users: UserRecord[];
+  selectedClaimUserId: string;
   busyAction: string | null;
+  isMlRunning: boolean;
+  onClaim: () => void;
+  onSelectedClaimUserIdChange: (value: string) => void;
   onCheckIn: () => void;
   onEnd: () => void;
 }) {
@@ -828,7 +1004,11 @@ function SessionHero({
       : session
         ? "success"
         : "neutral";
-  const confirmationTone = getConfirmationTone(derived);
+  const confirmationTone = getConfirmationTone(
+    derived,
+    confirmationWarningMinutes,
+    confirmationDangerMinutes,
+  );
   const confirmationLabel =
     confirmationTone === "danger"
       ? derived?.isOverdue
@@ -845,6 +1025,8 @@ function SessionHero({
             100,
         )
     : 0;
+  const selectedClaimUser =
+    users.find((user) => String(user.id) === selectedClaimUserId) ?? null;
 
   return (
     <article className="lb-hero-card">
@@ -863,26 +1045,39 @@ function SessionHero({
           <div
             className={classNames(
               "lb-session-focus",
-              `is-${confirmationTone}`,
+              !isMlRunning && `is-${confirmationTone}`,
+              isMlRunning && "is-ml",
             )}
           >
             <div>
-              <p className="lb-muted">{confirmationLabel}</p>
+              <p className="lb-muted">
+                {isMlRunning
+                  ? "ML/DL workload"
+                  : confirmationLabel}
+              </p>
               <strong>
-                {derived
-                  ? derived.isOverdue
-                    ? `${formatDuration(derived.overdueInMs)} overdue`
-                    : `${formatDuration(derived.dueInMs)} left`
-                  : "Not set"}
+                {isMlRunning
+                  ? "Code running"
+                  : derived
+                    ? derived.isOverdue
+                      ? `${formatDuration(derived.overdueInMs)} overdue`
+                      : `${formatDuration(derived.dueInMs)} left`
+                    : "Not set"}
               </strong>
-              <div
-                className="lb-confirmation-progress"
-                aria-label={`${Math.round(confirmationProgress)}% of check-in time remaining`}
-              >
-                <span style={pctStyle(confirmationProgress)} />
-              </div>
+              {!isMlRunning && (
+                <div
+                  className="lb-confirmation-progress"
+                  aria-label={`${Math.round(confirmationProgress)}% of check-in time remaining`}
+                >
+                  <span style={pctStyle(confirmationProgress)} />
+                </div>
+              )}
             </div>
-            <Clock3 className="h-8 w-8" aria-hidden="true" />
+            {isMlRunning ? (
+              <Activity className="h-8 w-8" aria-hidden="true" />
+            ) : (
+              <Clock3 className="h-8 w-8" aria-hidden="true" />
+            )}
           </div>
           <div className="lb-hero-actions">
             <button
@@ -914,15 +1109,54 @@ function SessionHero({
           </div>
         </>
       ) : (
-        <div className="lb-empty-spot">
-          <Zap className="h-7 w-7" aria-hidden="true" />
-          <div>
-            <p className="font-semibold">Ready for the next user</p>
-            <p className="lb-muted">
-              Claim the machine below before starting a long run.
-            </p>
+        <>
+          <div className="lb-empty-spot">
+            <Zap className="h-7 w-7" aria-hidden="true" />
+            <div>
+              <p className="font-semibold">Ready for the next user</p>
+              <p className="lb-muted">
+                Choose a user here and claim the machine directly.
+              </p>
+            </div>
           </div>
-        </div>
+          <div className="lb-claim-controls">
+            <div className="lb-claim-picker">
+              <label htmlFor="claim-user">Claim as</label>
+              <div className="lb-claim-select-row">
+                <span className="lb-avatar" aria-hidden="true">
+                  {initials(selectedClaimUser?.name ?? "User")}
+                </span>
+                <select
+                  id="claim-user"
+                  aria-label="User to claim the PC as"
+                  value={selectedClaimUserId}
+                  onChange={(event) =>
+                    onSelectedClaimUserIdChange(event.target.value)
+                  }
+                >
+                  {users.map((user) => (
+                    <option key={user.id} value={user.id}>
+                      {user.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={busyAction !== null || !selectedClaimUserId}
+              onClick={onClaim}
+              className="lb-hero-checkin lb-hero-claim"
+            >
+              <CheckCircle2 className="h-5 w-5" aria-hidden="true" />
+              <span>
+                {selectedClaimUser
+                  ? `Claim as ${selectedClaimUser.name}`
+                  : "Claim PC"}
+              </span>
+            </button>
+          </div>
+        </>
       )}
 
       <div className="lb-current-slot">
@@ -947,54 +1181,97 @@ function OperatorPanel({
   onEditUser,
   onCancelEditUser,
   onSubmitUser,
-  onStart,
+  isAddingUser,
+  newUserName,
+  onNewUserNameChange,
+  onStartAddUser,
+  onCancelAddUser,
+  onSubmitNewUser,
 }: {
   users: UserRecord[];
   openSession: SessionRecord | null;
   busyAction: string | null;
   editingUserId: number | null;
-  userForm: { name: string; telegramTag: string };
-  setUserForm: React.Dispatch<
-    React.SetStateAction<{ name: string; telegramTag: string }>
-  >;
+  userForm: { name: string };
+  setUserForm: React.Dispatch<React.SetStateAction<{ name: string }>>;
   onEditUser: (user: UserRecord) => void;
   onCancelEditUser: () => void;
   onSubmitUser: () => void;
-  onStart: (userId: number) => void;
+  isAddingUser: boolean;
+  newUserName: string;
+  onNewUserNameChange: (value: string) => void;
+  onStartAddUser: () => void;
+  onCancelAddUser: () => void;
+  onSubmitNewUser: () => void;
 }) {
   return (
     <article className="lb-panel">
       <div className="lb-card-head">
         <div>
-          <p className="lb-kicker">Quick actions</p>
-          <h2 className="lb-panel-title">Claim PC</h2>
+          <p className="lb-kicker">Users</p>
+          <h2 className="lb-panel-title">Edit user names</h2>
         </div>
-        <Activity className="h-5 w-5 text-[var(--muted)]" aria-hidden="true" />
+        <button
+          type="button"
+          className="lb-compact-button lb-add-user-button"
+          onClick={onStartAddUser}
+          disabled={busyAction !== null || isAddingUser}
+          aria-label="Add a new user"
+        >
+          <UserPlus className="h-4 w-4" aria-hidden="true" />
+          <span>Add user</span>
+        </button>
       </div>
 
       <p className="lb-action-hint">
         {openSession
-          ? "The machine is occupied. These users can claim it after release."
-          : "Tap your name to claim the machine before starting work."}
+          ? "These names are used for claims, schedules, and activity history."
+          : "Manage how users appear in the shift and schedule views."}
       </p>
+
+      {isAddingUser ? (
+        <form
+          className="lb-user-editor lb-add-user-editor"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmitNewUser();
+          }}
+        >
+          <label>
+            <span>Your name</span>
+            <input
+              autoFocus
+              placeholder="e.g. Alex"
+              value={newUserName}
+              onChange={(event) => onNewUserNameChange(event.target.value)}
+              maxLength={80}
+            />
+          </label>
+          <div className="lb-user-editor-actions">
+            <button
+              type="submit"
+              disabled={busyAction !== null || !newUserName.trim()}
+            >
+              Add
+            </button>
+            <button type="button" onClick={onCancelAddUser}>
+              Cancel
+            </button>
+          </div>
+        </form>
+      ) : null}
 
       <div className="lb-user-grid">
         {users.map((user) => (
           <div key={user.id} className="lb-user-card">
             <div className="lb-user-row">
-              <button
-                type="button"
-                disabled={busyAction !== null}
-                onClick={() => onStart(user.id)}
-                className="lb-user-chip"
-              >
+              <div className="lb-user-chip lb-user-chip-static">
                 <span className="lb-avatar">{initials(user.name)}</span>
                 <span>
                   <strong>{user.name}</strong>
-                  <small>{openSession ? "Waiting" : "Tap to claim"}</small>
+                  <small>Used in claims and schedule</small>
                 </span>
-                <ChevronRight className="h-4 w-4" aria-hidden="true" />
-              </button>
+              </div>
               <button
                 type="button"
                 className="lb-user-edit-button"
@@ -1021,19 +1298,6 @@ function OperatorPanel({
                       setUserForm((current) => ({
                         ...current,
                         name: event.target.value,
-                      }))
-                    }
-                  />
-                </label>
-                <label>
-                  <span>Telegram</span>
-                  <input
-                    value={userForm.telegramTag}
-                    placeholder="@username"
-                    onChange={(event) =>
-                      setUserForm((current) => ({
-                        ...current,
-                        telegramTag: event.target.value,
                       }))
                     }
                   />
@@ -1096,10 +1360,10 @@ function SchedulePanel({
   }));
 
   return (
-    <article className="lb-panel">
+    <article className="lb-panel lb-schedule-panel">
       <div className="lb-card-head">
         <div>
-          <p className="lb-kicker">Weekly rota</p>
+          <p className="lb-kicker">Weekly schedule</p>
           <h2 className="lb-panel-title">
             {current ? current.userName : "No current slot"}
           </h2>
@@ -1111,7 +1375,6 @@ function SchedulePanel({
           <section key={day.value} className="lb-day-row">
             <div className="lb-day-label">
               <strong>{day.label}</strong>
-              <span>{day.slots.length === 0 ? "Free" : `${day.slots.length} slot${day.slots.length === 1 ? "" : "s"}`}</span>
             </div>
             <div className="lb-slot-list">
               {day.slots.length === 0 ? (
@@ -1121,7 +1384,7 @@ function SchedulePanel({
                   className="lb-free-slot"
                   onClick={() => onChooseDay(day.value)}
                 >
-                  Open for anyone
+                  Assign
                 </button>
               ) : (
                 day.slots.map((slot) => (
@@ -1133,12 +1396,7 @@ function SchedulePanel({
                       selection?.slotId === slot.id && "is-editing",
                     )}
                   >
-                    <div>
-                      <strong>{slot.userName}</strong>
-                      <span>
-                        {slot.startTime}-{slot.endTime}
-                      </span>
-                    </div>
+                    <strong>{slot.userName}</strong>
                     <div className="lb-slot-actions">
                       <button
                         type="button"
@@ -1146,7 +1404,7 @@ function SchedulePanel({
                         disabled={busyAction !== null}
                         onClick={() => onEdit(slot)}
                       >
-                        <PencilLine className="h-4 w-4" aria-hidden="true" />
+                        <PencilLine className="h-3.5 w-3.5" aria-hidden="true" />
                       </button>
                       <button
                         type="button"
@@ -1154,21 +1412,12 @@ function SchedulePanel({
                         disabled={busyAction !== null}
                         onClick={() => onDelete(slot.id)}
                       >
-                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                        <Trash2 className="h-3.5 w-3.5" aria-hidden="true" />
                       </button>
                     </div>
                   </div>
                 ))
               )}
-              {selection?.dayOfWeek === day.value ? (
-                <ResearcherPicker
-                  users={users}
-                  busyAction={busyAction}
-                  isChanging={selection.slotId !== null}
-                  onAssign={onAssign}
-                  onCancel={onCancelEdit}
-                />
-              ) : null}
             </div>
           </section>
         ))}
@@ -1177,39 +1426,237 @@ function SchedulePanel({
   );
 }
 
-function ResearcherPicker({
+function SchedulePickerModal({
   users,
   busyAction,
   isChanging,
   onAssign,
   onCancel,
+  onSubmitNewUser,
 }: {
   users: UserRecord[];
   busyAction: string | null;
   isChanging: boolean;
   onAssign: (userId: number) => void;
   onCancel: () => void;
+  onSubmitNewUser: (name: string) => Promise<void>;
 }) {
+  const [newName, setNewName] = useState("");
+  const [creating, setCreating] = useState(false);
+
+  const handleCreate = async () => {
+    const trimmed = newName.trim();
+    if (!trimmed || creating) {
+      return;
+    }
+    setCreating(true);
+    try {
+      await onSubmitNewUser(trimmed);
+    } finally {
+      setCreating(false);
+      setNewName("");
+    }
+  };
+
   return (
-    <div className="lb-researcher-picker">
-      <div className="lb-picker-head">
-        <strong>{isChanging ? "Change day owner" : "Choose researcher"}</strong>
-        <button type="button" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-      <div className="lb-picker-grid">
-        {users.map((user) => (
+    <div className="lb-modal-backdrop" onClick={onCancel}>
+      <div
+        className="lb-modal"
+        role="dialog"
+        aria-label={isChanging ? "Change day owner" : "Assign a user"}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="lb-modal-head">
+          <strong>{isChanging ? "Change day owner" : "Assign a user"}</strong>
           <button
-            key={user.id}
             type="button"
-            disabled={busyAction !== null}
-            onClick={() => onAssign(user.id)}
+            className="lb-modal-close"
+            onClick={onCancel}
+            aria-label="Cancel"
           >
-            <span className="lb-avatar">{initials(user.name)}</span>
-            <span>{user.name}</span>
+            <X className="h-4 w-4" aria-hidden="true" />
           </button>
-        ))}
+        </div>
+
+        <div className="lb-modal-body">
+          <div className="lb-modal-user-list">
+            {users.map((user) => (
+              <button
+                key={user.id}
+                type="button"
+                className="lb-modal-user-btn"
+                disabled={busyAction !== null}
+                onClick={() => onAssign(user.id)}
+              >
+                <span className="lb-avatar">{initials(user.name)}</span>
+                <div>
+                  <strong>{user.name}</strong>
+                  <small>Available for schedule</small>
+                </div>
+              </button>
+            ))}
+            {users.length === 0 && (
+              <p className="lb-muted">No users yet. Add one below.</p>
+            )}
+          </div>
+
+          <div className="lb-modal-divider" />
+
+          <form
+            className="lb-modal-add-user"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void handleCreate();
+            }}
+          >
+            <label>
+              <span>Add new user</span>
+              <input
+                autoFocus={users.length === 0}
+                placeholder="e.g. Alex"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                maxLength={80}
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={busyAction !== null || !newName.trim() || creating}
+            >
+              {creating ? "Adding…" : "Add & assign"}
+            </button>
+          </form>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function WeeklyOverviewPanel({ weekly }: { weekly: GpuWeeklyPoint[] }) {
+  const busiestGpu = weekly.reduce<GpuWeeklyPoint | null>((best, point) => {
+    if (point.gpuAverage === null) {
+      return best;
+    }
+
+    if (best?.gpuAverage === null || best === null) {
+      return point;
+    }
+
+    return point.gpuAverage > best.gpuAverage ? point : best;
+  }, null);
+  const busiestMl = weekly.reduce<GpuWeeklyPoint | null>((best, point) => {
+    if (point.mlPercent === 0) {
+      return best;
+    }
+
+    if (best === null) {
+      return point;
+    }
+
+    return point.mlPercent > best.mlPercent ? point : best;
+  }, null);
+
+  return (
+    <section className="lb-weekly-overview" aria-label="Weekly GPU overview">
+      <article className="lb-panel lb-weekly-panel">
+        <div className="lb-card-head">
+          <div>
+            <p className="lb-kicker">Weekly overview</p> 
+          </div>
+          <Activity className="h-5 w-5 text-[var(--muted)]" aria-hidden="true" />
+        </div>
+ 
+        <div className="lb-weekly-chart-grid">
+          <WeeklyUsageChart
+            label="GPU average by day"
+            tone="gpu"
+            points={weekly}
+            getValue={(point) => point.gpuAverage}
+            getDetail={(point) =>
+              point.gpuAverage === null
+                ? "No samples"
+                : `${point.gpuAverage}% avg, ${point.gpuPeak ?? 0}% peak`
+            }
+          />
+          <WeeklyUsageChart
+            label="ML/DL activity by day"
+            tone="ml"
+            points={weekly}
+            getValue={(point) => point.mlPercent}
+            getDetail={(point) =>
+              `${point.mlPercent}% active, ${point.mlBucketCount}/${point.bucketCount} buckets`
+            }
+          />
+        </div>
+      </article>
+    </section>
+  );
+}
+
+function WeeklyUsageChart({
+  label,
+  tone,
+  points,
+  getValue,
+  getDetail,
+}: {
+  label: string;
+  tone: "gpu" | "ml";
+  points: GpuWeeklyPoint[];
+  getValue: (point: GpuWeeklyPoint) => number | null;
+  getDetail: (point: GpuWeeklyPoint) => string;
+}) {
+  const latestIndex = points.length > 0 ? points.length - 1 : null;
+  const [activeIndex, setActiveIndex] = useState<number | null>(latestIndex);
+  const activePoint =
+    activeIndex !== null && points[activeIndex] ? points[activeIndex] : null;
+  const activeValue = activePoint ? getValue(activePoint) : null;
+
+  return (
+    <div className={classNames("lb-weekly-chart", `is-${tone}`)}>
+      <div className="lb-weekly-chart-head">
+        <div>
+          <span>{label}</span>
+          <small>
+            {activePoint
+              ? `${formatWeekday(activePoint.date)}, ${formatShortDate(activePoint.date)}`
+              : "Saturday to Friday"}
+          </small>
+        </div>
+        <strong>
+          {activeValue === null ? "No data" : `${Math.round(clamp(activeValue))}%`}
+        </strong>
+      </div>
+
+      <div className="lb-weekly-bars" onPointerLeave={() => setActiveIndex(null)}>
+        {points.map((point, index) => {
+          const rawValue = getValue(point);
+          const value = rawValue === null ? 0 : Math.round(clamp(rawValue));
+
+          return (
+            <button
+              key={`${label}-${point.date}`}
+              type="button"
+              className={classNames(
+                "lb-weekly-day-bar",
+                activePoint?.date === point.date && "is-selected",
+                rawValue === null && "is-empty",
+              )}
+              onPointerEnter={() => setActiveIndex(index)}
+              onFocus={() => setActiveIndex(index)}
+              onBlur={() => setActiveIndex(null)}
+              title={`${formatWeekday(point.date)}: ${getDetail(point)}`}
+              aria-label={`${formatWeekday(point.date)} ${getDetail(point)}`}
+            >
+              <span className="lb-weekly-bar-track" aria-hidden="true">
+                <span style={pctStyle(value)} />
+              </span>
+              <span className="lb-weekly-day-label">
+                {formatWeekday(point.date)}
+              </span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -1293,6 +1740,7 @@ function SystemPanel({
   activeRatio,
   consecutiveSamples,
   activity,
+  processActivity,
   lastUpdateAge,
   sampleAgeMs,
 }: {
@@ -1302,6 +1750,7 @@ function SystemPanel({
   activeRatio: number;
   consecutiveSamples: number;
   activity: StatusResponse["gpu"]["activity"];
+  processActivity: StatusResponse["gpu"]["processActivity"];
   lastUpdateAge: number | null;
   sampleAgeMs: number | null;
 }) {
@@ -1342,6 +1791,18 @@ function SystemPanel({
         <InfoItem
           label="Current streak"
           value={`${activity.consecutiveActiveSamples} samples`}
+        />
+        <InfoItem
+          label="ML/DL signal"
+          value={
+            processActivity.isLikelyMlWorkload
+              ? `${processActivity.likelyMlProcessCount} process`
+              : "None"
+          }
+        />
+        <InfoItem
+          label="ML/DL VRAM"
+          value={formatMemory(processActivity.likelyMlUsedMemoryMb)}
         />
       </div>
     </article>
@@ -1402,7 +1863,12 @@ function EventIcon({ type }: { type: string }) {
     return <CircleAlert className="h-4 w-4 text-[var(--warning)]" />;
   }
 
-  if (type.includes("START") || type.includes("CHECK") || type.includes("CLAIM")) {
+  if (
+    type.includes("START") ||
+    type.includes("CHECK") ||
+    type.includes("CLAIM") ||
+    type.includes("RENEW")
+  ) {
     return <CircleCheck className="h-4 w-4 text-[var(--ok)]" />;
   }
 

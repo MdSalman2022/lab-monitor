@@ -1,8 +1,9 @@
 import { appConfig, type AppConfig } from "./config";
-import type { LabBeaconDatabase } from "./db";
+import type { LabScheduleManagerDatabase } from "./db";
 import { getDb } from "./db";
 import { conflict, notFound } from "./errors";
 import { recordEvent, type EventRecord } from "./events";
+import type { GpuMlActivitySummary } from "./gpu";
 
 export type SessionStatus =
   | "ACTIVE"
@@ -13,7 +14,6 @@ export type SessionStatus =
 export type UserRecord = {
   id: number;
   name: string;
-  telegramTag: string | null;
   isActive: boolean;
 };
 
@@ -58,7 +58,6 @@ function mapUser(row: UserRow): UserRecord {
   return {
     id: row.id,
     name: row.name,
-    telegramTag: row.telegram_tag,
     isActive: row.is_active === 1,
   };
 }
@@ -92,15 +91,45 @@ function mapSession(
   };
 }
 
-export function listUsers(db: LabBeaconDatabase = getDb()) {
+export function listUsers(db: LabScheduleManagerDatabase = getDb()) {
   const rows = db
-    .prepare("SELECT * FROM users WHERE is_active = 1 ORDER BY name")
+    .prepare("SELECT * FROM users WHERE is_active = 1 ORDER BY id")
     .all() as UserRow[];
 
   return rows.map(mapUser);
 }
 
-export function getUser(userId: number, db: LabBeaconDatabase = getDb()) {
+export function createUser(
+  input: { name: string },
+  db: LabScheduleManagerDatabase = getDb(),
+) {
+  const name = input.name.trim();
+  if (!name) {
+    throw conflict("Name is required");
+  }
+
+  const existing = db
+    .prepare("SELECT id FROM users WHERE name = ? AND is_active = 1")
+    .get(name) as { id: number } | undefined;
+
+  if (existing) {
+    throw conflict("A researcher with that name already exists");
+  }
+
+  const result = db
+    .prepare(
+      `
+      INSERT INTO users (name, is_active, created_at)
+      VALUES (@name, 1, @createdAt)
+    `,
+    )
+    .run({ name, createdAt: new Date().toISOString() });
+
+  const newId = Number(result.lastInsertRowid);
+  return getUser(newId, db);
+}
+
+export function getUser(userId: number, db: LabScheduleManagerDatabase = getDb()) {
   const row = db.prepare("SELECT * FROM users WHERE id = ?").get(userId) as
     | UserRow
     | undefined;
@@ -116,29 +145,24 @@ export function updateUser(
   userId: number,
   input: Partial<{
     name: string;
-    telegramTag: string | null;
   }>,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const current = getUser(userId, db);
   const next = {
     name: input.name ?? current.name,
-    telegramTag:
-      input.telegramTag === undefined ? current.telegramTag : input.telegramTag,
   };
 
   try {
     db.prepare(
       `
       UPDATE users
-      SET name = @name,
-          telegram_tag = @telegramTag
+      SET name = @name
       WHERE id = @userId AND is_active = 1
     `,
     ).run({
       userId,
       name: next.name,
-      telegramTag: next.telegramTag,
     });
   } catch (error) {
     if (
@@ -154,7 +178,7 @@ export function updateUser(
   return getUser(userId, db);
 }
 
-export function getOpenSession(db: LabBeaconDatabase = getDb()) {
+export function getOpenSession(db: LabScheduleManagerDatabase = getDb()) {
   const row = db
     .prepare(
       `
@@ -173,7 +197,7 @@ export function getOpenSession(db: LabBeaconDatabase = getDb()) {
 
 export function getSessionById(
   sessionId: number,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const row = db
     .prepare(
@@ -196,7 +220,7 @@ export function getSessionById(
 export function startSession(
   userId: number,
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   return db.transaction(() => {
     const user = getUser(userId, db);
@@ -223,7 +247,7 @@ export function startSession(
         type: "SESSION_STARTED",
         userId: user.id,
         sessionId: session.id,
-        message: `${user.name} started a LabBeacon session.`,
+        message: `${user.name} started a Lab Schedule Manager session.`,
       },
       db,
     );
@@ -235,7 +259,7 @@ export function startSession(
 export function checkInSession(
   sessionId: number,
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   return db.transaction(() => {
     const session = getSessionById(sessionId, db);
@@ -269,7 +293,7 @@ export function checkInSession(
 export function endSession(
   sessionId: number,
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   return db.transaction(() => {
     const session = getSessionById(sessionId, db);
@@ -292,7 +316,7 @@ export function endSession(
         type: "SESSION_ENDED",
         userId: updated.userId,
         sessionId: updated.id,
-        message: `${updated.userName} ended their LabBeacon session.`,
+        message: `${updated.userName} ended their Lab Schedule Manager session.`,
       },
       db,
     );
@@ -303,7 +327,7 @@ export function endSession(
 export function claimSession(
   userId: number,
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   return db.transaction(() => {
     const user = getUser(userId, db);
@@ -372,9 +396,10 @@ export function evaluateOpenSessions(
       threshold: number;
       windowMinutes: number;
     };
+    mlActivity?: GpuMlActivitySummary;
     config?: AppConfig;
   },
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const now = params.now ?? new Date();
   const config = params.config ?? appConfig;
@@ -391,7 +416,11 @@ export function evaluateOpenSessions(
   }
 
   const nowIso = iso(now);
-  if (!params.gpuActivity.isSustained) {
+  const isProtectedByWorkload =
+    params.gpuActivity.isSustained ||
+    Boolean(params.mlActivity?.isLikelyMlWorkload);
+
+  if (!isProtectedByWorkload) {
     db.prepare(
       `
       UPDATE sessions
@@ -409,8 +438,11 @@ export function evaluateOpenSessions(
           type: "SESSION_INACTIVE",
           userId: openSession.userId,
           sessionId: openSession.id,
-          message: `${openSession.userName} missed check-in and sustained GPU activity was not detected.`,
-          metadata: params.gpuActivity,
+          message: `${openSession.userName} missed check-in and sustained GPU or ML/DL activity was not detected.`,
+          metadata: {
+            gpuActivity: params.gpuActivity,
+            mlActivity: params.mlActivity ?? null,
+          },
         },
         db,
       ),
@@ -419,6 +451,35 @@ export function evaluateOpenSessions(
   }
 
   if (openSession.status === "ACTIVE") {
+    if (params.mlActivity?.isLikelyMlWorkload) {
+      db.prepare(
+        `
+        UPDATE sessions
+        SET status = 'ACTIVE',
+            last_checkin_at = @nowIso,
+            updated_at = @nowIso
+        WHERE id = @sessionId
+      `,
+      ).run({ nowIso, sessionId: openSession.id });
+
+      events.push(
+        recordEvent(
+          {
+            type: "SESSION_AUTO_RENEWED",
+            userId: openSession.userId,
+            sessionId: openSession.id,
+            message: `${openSession.userName} missed check-in, but an ML/DL GPU process is still running. Session was auto-renewed.`,
+            metadata: {
+              gpuActivity: params.gpuActivity,
+              mlActivity: params.mlActivity ?? null,
+            },
+          },
+          db,
+        ),
+      );
+      return events;
+    }
+
     db.prepare(
       `
       UPDATE sessions
@@ -434,7 +495,10 @@ export function evaluateOpenSessions(
           userId: openSession.userId,
           sessionId: openSession.id,
           message: `${openSession.userName} needs to confirm, but sustained GPU activity is still running.`,
-          metadata: params.gpuActivity,
+          metadata: {
+            gpuActivity: params.gpuActivity,
+            mlActivity: params.mlActivity ?? null,
+          },
         },
         db,
       ),
@@ -446,7 +510,7 @@ export function evaluateOpenSessions(
 
 export function listSessionsForDay(
   date: string,
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const start = new Date(`${date}T00:00:00`);
   const end = new Date(start.getTime() + 24 * 60 * 60_000);

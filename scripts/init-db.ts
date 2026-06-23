@@ -4,4 +4,4 @@ import { appConfig } from "../src/server/config";
 
 const db = getDb();
 seedDefaultUsers(db, appConfig.defaultUsers);
-console.log(`LabBeacon database ready at ${appConfig.databasePath}`);
+console.log(`Lab Schedule Manager database ready at ${appConfig.databasePath}`);

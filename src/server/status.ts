@@ -1,11 +1,14 @@
 import { appConfig } from "./config";
-import type { LabBeaconDatabase } from "./db";
+import type { LabScheduleManagerDatabase } from "./db";
 import { getDb } from "./db";
 import { listRecentEvents } from "./events";
 import {
   getGpuActivitySummary,
   getGpuAverage,
+  getGpuDaySeries,
   getLatestGpuSample,
+  getGpuMlActivitySummary,
+  getGpuWeeklyOverview,
   listRecentGpuSamples,
 } from "./gpu";
 import { getCurrentScheduleSlot, listScheduleSlots } from "./schedule";
@@ -20,16 +23,23 @@ function todayKey(now = new Date()) {
 
 export function getDashboardStatus(
   now = new Date(),
-  db: LabBeaconDatabase = getDb(),
+  db: LabScheduleManagerDatabase = getDb(),
 ) {
   const gpuAverage = getGpuAverage(now, appConfig.gpuIdleWindowMinutes, db);
   const gpuActivity = getGpuActivitySummary(now, undefined, db);
+  const processActivity = getGpuMlActivitySummary(
+    now,
+    appConfig.gpuIdleWindowMinutes,
+    db,
+  );
 
   return {
     now: now.toISOString(),
     config: {
       checkinIntervalMinutes: appConfig.checkinIntervalMinutes,
       graceMinutes: appConfig.graceMinutes,
+      confirmationWarningMinutes: appConfig.confirmationWarningMinutes,
+      confirmationDangerMinutes: appConfig.confirmationDangerMinutes,
       gpuIdleThreshold: appConfig.gpuIdleThreshold,
       gpuIdleWindowMinutes: appConfig.gpuIdleWindowMinutes,
       gpuBusyMinActiveRatio: appConfig.gpuBusyMinActiveRatio,
@@ -40,10 +50,16 @@ export function getDashboardStatus(
     openSession: getOpenSession(db),
     gpu: {
       latest: getLatestGpuSample(db),
-      recent: listRecentGpuSamples(28, db),
+      recent: listRecentGpuSamples(appConfig.recentGpuSamplesLimit, db),
+      day: getGpuDaySeries(now, db),
+      weekly: getGpuWeeklyOverview(now, db),
       average: gpuAverage,
       activity: gpuActivity,
-      isIdle: gpuActivity.sampleCount === 0 ? null : !gpuActivity.isSustained,
+      processActivity,
+      isIdle:
+        gpuActivity.sampleCount === 0 && processActivity.processCount === 0
+          ? null
+          : !gpuActivity.isSustained && !processActivity.isLikelyMlWorkload,
     },
     schedule: {
       current: getCurrentScheduleSlot(now, db),
@@ -53,6 +69,6 @@ export function getDashboardStatus(
       date: todayKey(now),
       sessions: listSessionsForDay(todayKey(now), db),
     },
-    events: listRecentEvents(12, db),
+    events: listRecentEvents(30, db),
   };
 }

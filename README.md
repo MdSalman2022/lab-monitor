@@ -1,6 +1,6 @@
-# LabBeacon
+# Lab Schedule Manager
 
-LabBeacon is a local-first Next.js PWA for tracking a shared Windows GPU lab PC. It serves a dashboard, stores sessions in SQLite, polls `nvidia-smi` from a separate Node worker, and sends Telegram alerts when a scheduled or active slot goes idle.
+Lab Schedule Manager is a local-first Next.js PWA for tracking a shared Windows GPU lab PC. It serves a dashboard, stores sessions in SQLite, polls `nvidia-smi` from a separate Node worker, and sends Telegram alerts when a scheduled or active slot goes idle.
 
 ## Getting Started
 
@@ -33,8 +33,8 @@ npm run build:worker
 The Next.js server is configured with standalone output. After building, the Windows services should run:
 
 ```text
-LabBeaconWeb    -> node .next\standalone\server.js
-LabBeaconWorker -> node dist-worker\src\worker\index.js
+LabScheduleManagerWeb    -> node .next\standalone\server.js
+LabScheduleManagerWorker -> node dist-worker\src\worker\index.js
 ```
 
 Install the services with NSSM after the build:
@@ -45,16 +45,9 @@ Install the services with NSSM after the build:
 
 Cloudflare Tunnel should point to `http://localhost:3000`, with Cloudflare Access protecting the URL. The visible Edge/Chrome PWA can open at Windows logon, while the web server and worker start at boot through services.
 
-## Environment
+## Configuration
 
-Key variables live in `.env.local`:
-
-- `LAB_BEACON_USERS`: comma-separated list of the five users
-- `LAB_BEACON_CHECKIN_INTERVAL_MINUTES`: default `180`
-- `LAB_BEACON_GRACE_MINUTES`: default `15`
-- `LAB_BEACON_GPU_IDLE_THRESHOLD`: default `10`
-- `TELEGRAM_DRY_RUN`: default `true`
-- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`: required for real alerts
+Runtime settings live in `src/server/static-config.ts` so the local lab machine has one obvious place to change check-in timing, GPU thresholds, Telegram bot/channel details, and the default user slots.
 
 ## Project Shape
 
@@ -73,4 +66,3 @@ data           local SQLite runtime data
 - PWA guide: https://nextjs.org/docs/app/guides/progressive-web-apps
 - Route Handlers: https://nextjs.org/docs/app/getting-started/route-handlers
 - Standalone output: https://nextjs.org/docs/app/api-reference/config/next-config-js/output
-# lab-monitor

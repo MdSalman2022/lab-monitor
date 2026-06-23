@@ -1,7 +1,9 @@
 import type { NextConfig } from "next";
 
+process.env.TZ = "Asia/Dhaka";
+
 const nextConfig: NextConfig = {
-  output: "standalone",
+  output: process.env.BUILD_STANDALONE ? "standalone" : undefined,
   serverExternalPackages: ["better-sqlite3"],
   async headers() {
     return [

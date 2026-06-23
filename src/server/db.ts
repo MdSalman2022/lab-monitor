@@ -4,9 +4,9 @@ import Database from "better-sqlite3";
 import { appConfig, ensureRuntimeDirs } from "./config";
 import { initializeDatabase, seedDefaultUsers } from "./schema";
 
-export type LabBeaconDatabase = Database.Database;
+export type LabScheduleManagerDatabase = Database.Database;
 
-let singleton: LabBeaconDatabase | null = null;
+let singleton: LabScheduleManagerDatabase | null = null;
 
 export function openDatabase(dbPath = appConfig.databasePath) {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });

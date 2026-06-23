@@ -14,7 +14,7 @@ import {
 const tempDirs: string[] = [];
 
 function testDb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lab-beacon-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lab-schedule-manager-"));
   tempDirs.push(dir);
   const db = openDatabase(path.join(dir, "test.sqlite"));
   seedDefaultUsers(db, ["A"]);

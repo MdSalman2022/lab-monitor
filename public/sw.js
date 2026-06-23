@@ -1,4 +1,4 @@
-const CACHE_NAME = "lab-beacon-shell-v1";
+const CACHE_NAME = "lab-schedule-manager-shell-v1";
 const SHELL_URLS = ["/", "/manifest.webmanifest", "/icon.svg"];
 
 self.addEventListener("install", (event) => {

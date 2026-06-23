@@ -1,11 +1,15 @@
+process.env.TZ = "Asia/Dhaka";
+
 import { appConfig } from "../server/config";
 import { getDb } from "../server/db";
 import type { EventRecord } from "../server/events";
 import {
   getGpuActivitySummary,
   getGpuAverage,
+  getGpuMlActivitySummary,
   insertGpuSample,
   readGpuViaNvidiaSmi,
+  sampleGpuProcessesNow,
 } from "../server/gpu";
 import { checkUnclaimedCurrentSlot } from "../server/schedule";
 import { evaluateOpenSessions } from "../server/sessions";
@@ -14,13 +18,13 @@ import { sendTelegramMessage } from "../server/telegram";
 function formatAlert(event: EventRecord) {
   switch (event.type) {
     case "SESSION_INACTIVE":
-      return `LabBeacon: ${event.message} Slot is free to claim.`;
+      return `Lab Schedule Manager: ${event.message} Slot is free to claim.`;
     case "SLOT_UNCLAIMED":
-      return `LabBeacon: ${event.message}`;
+      return `Lab Schedule Manager: ${event.message}`;
     case "SESSION_CLAIMED":
     case "SESSION_STARTED":
     case "SESSION_ENDED":
-      return `LabBeacon: ${event.message}`;
+      return `Lab Schedule Manager: ${event.message}`;
     default:
       return null;
   }
@@ -32,13 +36,24 @@ export async function runWorkerOnce(now = new Date()) {
     const gpu = await readGpuViaNvidiaSmi();
     insertGpuSample({ ...gpu, sampledAt: now }, db);
   } catch (error) {
-    console.error("[LabBeacon] GPU sample failed", error);
+    console.error("[Lab Schedule Manager] GPU sample failed", error);
+  }
+
+  try {
+    await sampleGpuProcessesNow(db, now);
+  } catch (error) {
+    console.error("[Lab Schedule Manager] GPU process sample failed", error);
   }
 
   const gpuAverage = getGpuAverage(now, appConfig.gpuIdleWindowMinutes, db);
   const gpuActivity = getGpuActivitySummary(now, undefined, db);
+  const mlActivity = getGpuMlActivitySummary(
+    now,
+    appConfig.gpuIdleWindowMinutes,
+    db,
+  );
   const sessionEvents = evaluateOpenSessions(
-    { now, gpuActivity },
+    { now, gpuActivity, mlActivity },
     db,
   );
   const scheduleEvent = checkUnclaimedCurrentSlot(now, db);
@@ -61,7 +76,7 @@ export async function runWorkerOnce(now = new Date()) {
 
 export function startWorker() {
   console.log(
-    `[LabBeacon] Worker started. Polling every ${appConfig.pollSeconds}s.`,
+    `[Lab Schedule Manager] Worker started. Polling every ${appConfig.pollSeconds}s.`,
   );
   void runWorkerOnce();
   const interval = setInterval(() => {
@@ -70,7 +85,7 @@ export function startWorker() {
 
   const stop = () => {
     clearInterval(interval);
-    console.log("[LabBeacon] Worker stopped.");
+    console.log("[Lab Schedule Manager] Worker stopped.");
     process.exit(0);
   };
 

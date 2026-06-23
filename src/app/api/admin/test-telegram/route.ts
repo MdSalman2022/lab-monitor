@@ -9,7 +9,7 @@ export async function POST() {
   try {
     const event = recordEvent({
       type: "TELEGRAM_TEST",
-      message: "LabBeacon Telegram test alert.",
+      message: "Lab Schedule Manager Telegram test alert.",
     });
     const telegram = await sendTelegramMessage(event.message);
     return ok({ event, telegram });

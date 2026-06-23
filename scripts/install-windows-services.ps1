@@ -21,20 +21,21 @@ if (-not (Test-Path -LiteralPath $workerScript)) {
   throw "Missing $workerScript. Run npm run build:worker first."
 }
 
-& $NssmPath install LabBeaconWeb $node $webScript
-& $NssmPath set LabBeaconWeb AppDirectory $ProjectRoot
-& $NssmPath set LabBeaconWeb AppEnvironmentExtra "PORT=$Port"
-& $NssmPath set LabBeaconWeb AppStdout (Join-Path $logsDir "web.log")
-& $NssmPath set LabBeaconWeb AppStderr (Join-Path $logsDir "web-error.log")
-& $NssmPath set LabBeaconWeb Start SERVICE_AUTO_START
+& $NssmPath install LabScheduleManagerWeb $node $webScript
+& $NssmPath set LabScheduleManagerWeb AppDirectory $ProjectRoot
+& $NssmPath set LabScheduleManagerWeb AppEnvironmentExtra "PORT=$Port`r`nTZ=Asia/Dhaka"
+& $NssmPath set LabScheduleManagerWeb AppStdout (Join-Path $logsDir "web.log")
+& $NssmPath set LabScheduleManagerWeb AppStderr (Join-Path $logsDir "web-error.log")
+& $NssmPath set LabScheduleManagerWeb Start SERVICE_AUTO_START
 
-& $NssmPath install LabBeaconWorker $node $workerScript
-& $NssmPath set LabBeaconWorker AppDirectory $ProjectRoot
-& $NssmPath set LabBeaconWorker AppStdout (Join-Path $logsDir "worker.log")
-& $NssmPath set LabBeaconWorker AppStderr (Join-Path $logsDir "worker-error.log")
-& $NssmPath set LabBeaconWorker Start SERVICE_AUTO_START
+& $NssmPath install LabScheduleManagerWorker $node $workerScript
+& $NssmPath set LabScheduleManagerWorker AppDirectory $ProjectRoot
+& $NssmPath set LabScheduleManagerWorker AppEnvironmentExtra "TZ=Asia/Dhaka"
+& $NssmPath set LabScheduleManagerWorker AppStdout (Join-Path $logsDir "worker.log")
+& $NssmPath set LabScheduleManagerWorker AppStderr (Join-Path $logsDir "worker-error.log")
+& $NssmPath set LabScheduleManagerWorker Start SERVICE_AUTO_START
 
-Write-Host "Installed LabBeaconWeb and LabBeaconWorker."
+Write-Host "Installed LabScheduleManagerWeb and LabScheduleManagerWorker."
 Write-Host "Start them with:"
-Write-Host "  nssm start LabBeaconWeb"
-Write-Host "  nssm start LabBeaconWorker"
+Write-Host "  nssm start LabScheduleManagerWeb"
+Write-Host "  nssm start LabScheduleManagerWorker"

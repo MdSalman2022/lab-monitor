@@ -7,13 +7,10 @@ export const userIdSchema = z.object({
 export const userUpdateSchema = z.object({
   id: z.coerce.number().int().positive(),
   name: z.string().trim().min(1).max(80).optional(),
-  telegramTag: z
-    .string()
-    .trim()
-    .max(80)
-    .transform((value) => (value.length === 0 ? null : value))
-    .nullable()
-    .optional(),
+});
+
+export const userCreateSchema = z.object({
+  name: z.string().trim().min(1).max(80),
 });
 
 export const sessionIdSchema = z.object({

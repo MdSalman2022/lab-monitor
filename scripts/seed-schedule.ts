@@ -16,12 +16,12 @@ const seedSchedule = db.transaction(() => {
   `,
   ).run({ now });
 
-  const researcher2 = db
+  const user2 = db
     .prepare("SELECT id FROM users WHERE name = ?")
-    .get("Researcher 2") as { id: number } | undefined;
+    .get("User 2") as { id: number } | undefined;
 
-  if (!researcher2) {
-    throw new Error("Researcher 2 was not found in the users table");
+  if (!user2) {
+    throw new Error("User 2 was not found in the users table");
   }
 
   const insert = db.prepare(`
@@ -33,7 +33,7 @@ const seedSchedule = db.transaction(() => {
 
   for (const dayOfWeek of [1, 2]) {
     insert.run({
-      userId: researcher2.id,
+      userId: user2.id,
       dayOfWeek,
       now,
     });
@@ -43,5 +43,5 @@ const seedSchedule = db.transaction(() => {
 seedSchedule();
 
 console.log(
-  "Seeded weekly schedule: Researcher 2 on Monday and Tuesday; all other days free.",
+  "Seeded weekly schedule: User 2 on Monday and Tuesday; all other days free.",
 );

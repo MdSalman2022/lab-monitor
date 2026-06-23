@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { LabBeaconDatabase } from "./db";
+import type { LabScheduleManagerDatabase } from "./db";
 import { openDatabase } from "./db";
 import { seedDefaultUsers } from "./schema";
 import {
@@ -15,7 +15,7 @@ import {
 const tempDirs: string[] = [];
 
 function testDb() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lab-beacon-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "lab-schedule-manager-"));
   tempDirs.push(dir);
   const db = openDatabase(path.join(dir, "test.sqlite"));
   seedDefaultUsers(db, ["A", "B"]);
@@ -28,7 +28,7 @@ afterEach(() => {
   }
 });
 
-function close(db: LabBeaconDatabase) {
+function close(db: LabScheduleManagerDatabase) {
   db.close();
 }
 
@@ -150,6 +150,58 @@ describe("sessions", () => {
     expect(events).toHaveLength(1);
     expect(events[0].type).toBe("SESSION_INACTIVE");
     expect(getOpenSession(db)).toBeNull();
+    close(db);
+  });
+
+  it("auto-renews an overdue session when a likely ML/DL GPU process is present", () => {
+    const db = testDb();
+    const startedAt = new Date("2026-06-23T00:00:00.000Z");
+    startSession(1, startedAt, db);
+
+    const now = new Date("2026-06-23T03:16:00.000Z");
+    const events = evaluateOpenSessions(
+      {
+        now,
+        gpuActivity: {
+          averageUtil: 2,
+          activeSampleRatio: 0,
+          consecutiveActiveSamples: 0,
+          isSustained: false,
+          threshold: 10,
+          windowMinutes: 10,
+        },
+        mlActivity: {
+          windowMinutes: 10,
+          processCount: 1,
+          pythonProcessCount: 1,
+          likelyMlProcessCount: 1,
+          totalUsedMemoryMb: 8192,
+          likelyMlUsedMemoryMb: 8192,
+          isLikelyMlWorkload: true,
+          processes: [
+            {
+              pid: 1234,
+              processName: "python.exe",
+              commandLine: "python train.py",
+              usedMemoryMb: 8192,
+              isPython: true,
+              isLikelyMl: true,
+              reason: "python_gpu_memory",
+              sampledAt: "2026-06-23T03:16:00.000Z",
+              source: "nvidia-smi",
+            },
+          ],
+        },
+      },
+      db,
+    );
+
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("SESSION_AUTO_RENEWED");
+    expect(events[0].message).toContain("auto-renewed");
+    const session = getOpenSession(db);
+    expect(session?.status).toBe("ACTIVE");
+    expect(session?.lastCheckinAt).toBe(now.toISOString());
     close(db);
   });
 });

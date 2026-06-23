@@ -2,12 +2,12 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "LabBeacon",
+  title: "Lab Schedule Manager",
   description: "Shared GPU lab PC shift tracker",
-  applicationName: "LabBeacon",
+  applicationName: "Lab Schedule Manager",
   appleWebApp: {
     capable: true,
-    title: "LabBeacon",
+    title: "Lab Schedule Manager",
     statusBarStyle: "default",
   },
 };
