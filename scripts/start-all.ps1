@@ -67,9 +67,9 @@ for ($i = 0; $i -lt 30; $i++) {
 $tunnelOutLog = Join-Path $logDir "tunnel.log"
 $tunnelErrLog = Join-Path $logDir "tunnel-error.log"
 $cloudflaredPath = (Get-Command cloudflared -ErrorAction SilentlyContinue).Source
-if (-not $cloudflaredPath) {
-  $cloudflaredPath = "C:\Program Files\cloudflared\cloudflared.exe"
-}
+if (-not $cloudflaredPath) { $cloudflaredPath = "C:\Program Files\cloudflared\cloudflared.exe" }
+if (-not (Test-Path $cloudflaredPath)) { $cloudflaredPath = "$env:ProgramFiles(x86)\cloudflared\cloudflared.exe" }
+if (-not (Test-Path $cloudflaredPath)) { $cloudflaredPath = "$env:LOCALAPPDATA\cloudflared\cloudflared.exe" }
 if (Test-Path $cloudflaredPath) {
   $tunnelProcess = Start-Process -FilePath $cloudflaredPath -ArgumentList "tunnel --url http://localhost:3000 --protocol http2" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $tunnelOutLog -RedirectStandardError $tunnelErrLog
   Write-Log "Cloudflare tunnel started (PID: $($tunnelProcess.Id))"
