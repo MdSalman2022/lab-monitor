@@ -23,6 +23,8 @@ export const appConfig = {
   gpuBusyMinConsecutiveSamples: staticConfig.gpu.busyMinConsecutiveSamples,
   recentGpuSamplesLimit: staticConfig.gpu.recentSamplesLimit,
   mlProcessMinMemoryMb: staticConfig.gpu.mlProcessMinMemoryMb,
+  mlInferenceMinGpuUtil: staticConfig.gpu.mlInferenceMinGpuUtil,
+  mlInferenceMinVramMb: staticConfig.gpu.mlInferenceMinVramMb,
   mlProcessKeywords: [...staticConfig.gpu.mlProcessKeywords],
   pollSeconds: staticConfig.timings.pollSeconds,
   scheduleStartGraceMinutes: staticConfig.timings.scheduleStartGraceMinutes,

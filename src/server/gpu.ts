@@ -433,6 +433,80 @@ async function sampleWslPythonProcesses(
   }
 }
 
+async function inferHiddenMlProcesses(
+  db: LabScheduleManagerDatabase,
+  now = new Date(),
+): Promise<
+  Array<{
+    pid: number;
+    processName: string;
+    commandLine: string | null;
+    usedMemoryMb: number;
+    sampledAt: Date;
+  }>
+> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  const latestSample = getLatestGpuSample(db);
+  if (!latestSample) {
+    return [];
+  }
+
+  const vramUsedMb = latestSample.memoryTotalMb
+    ? (latestSample.memoryUsedMb / latestSample.memoryTotalMb) *
+      latestSample.memoryTotalMb
+    : latestSample.memoryUsedMb;
+
+  const gpuBusy = latestSample.gpuUtil >= appConfig.mlInferenceMinGpuUtil;
+  const vramBusy = vramUsedMb >= appConfig.mlInferenceMinVramMb;
+  const veryHighVram = vramUsedMb >= appConfig.mlInferenceMinVramMb * 2;
+
+  if (!gpuBusy && !vramBusy) {
+    return [];
+  }
+
+  const [wslProcesses, windowsProcesses] = await Promise.all([
+    sampleWslPythonProcesses(now),
+    samplePythonProcessesFromWmi(now),
+  ]);
+
+  const combined = [...wslProcesses, ...windowsProcesses];
+  // Very high VRAM + high GPU with no visible compute apps is almost certainly
+  // a compute workload such as WSL conda PyTorch.
+  const forceInfer = latestSample.gpuUtil >= 50 && veryHighVram;
+
+  if (combined.length === 0 && !forceInfer) {
+    return [];
+  }
+
+  const maxMemory =
+    combined.length > 0
+      ? Math.max(...combined.map((processInfo) => processInfo.usedMemoryMb))
+      : 0;
+  const representative =
+    combined.length > 0
+      ? combined.reduce((best, current) =>
+          current.usedMemoryMb > best.usedMemoryMb ? current : best,
+        )
+      : null;
+
+  console.log(
+    `[Lab Schedule Manager] ML/DL inference: GPU ${latestSample.gpuUtil}% / VRAM ${Math.round(vramUsedMb)}MB busy with ${combined.length} Python/ML process(es); inferring hidden ML workload`,
+  );
+
+  return [
+    {
+      pid: representative?.pid ?? 0,
+      processName: representative?.processName ?? "inferred-ml-workload",
+      commandLine: representative?.commandLine ?? "inferred from gpu activity",
+      usedMemoryMb: Math.max(maxMemory, latestSample.memoryUsedMb),
+      sampledAt: now,
+    },
+  ];
+}
+
 export function insertGpuSample(
   sample: {
     gpuUtil: number;
@@ -589,6 +663,11 @@ export async function sampleGpuProcessesNow(
         `[Lab Schedule Manager] ML/DL fallback: found ${fallbackProcesses.length} Python process(es) with ML keywords`,
       );
       return insertGpuProcessSamples(fallbackProcesses, db);
+    }
+
+    const inferred = await inferHiddenMlProcesses(db, now);
+    if (inferred.length > 0) {
+      return insertGpuProcessSamples(inferred, db);
     }
   }
 

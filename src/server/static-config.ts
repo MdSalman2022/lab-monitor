@@ -17,6 +17,8 @@ export const staticConfig = {
     busyMinConsecutiveSamples: 3,
     recentSamplesLimit: 28,
     mlProcessMinMemoryMb: 512,
+    mlInferenceMinGpuUtil: 30,
+    mlInferenceMinVramMb: 8192,
     mlProcessKeywords: [
       "accelerate",
       "cuda",
