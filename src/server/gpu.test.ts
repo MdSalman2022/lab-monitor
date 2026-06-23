@@ -92,9 +92,17 @@ describe("parseNvidiaSmiComputeAppsOutput", () => {
 
   it("skips malformed compute process rows gracefully", () => {
     expect(parseNvidiaSmiComputeAppsOutput("python.exe, nope")).toEqual([]);
+  });
+
+  it("treats [N/A] GPU memory as 0 and preserves WSL-style process rows", () => {
     expect(
-      parseNvidiaSmiComputeAppsOutput("1300, [Insufficient Permissions], [N/A]"),
-    ).toEqual([]);
+      parseNvidiaSmiComputeAppsOutput(
+        "42, /usr/bin/python3, [N/A]\n1300, [Insufficient Permissions], [N/A]\n",
+      ),
+    ).toEqual([
+      { pid: 42, processName: "/usr/bin/python3", usedMemoryMb: 0 },
+      { pid: 1300, processName: "[Insufficient Permissions]", usedMemoryMb: 0 },
+    ]);
   });
 });
 
@@ -141,6 +149,34 @@ describe("inferGpuProcessKind", () => {
       isPython: false,
       isLikelyMl: false,
       reason: "not_ml_process",
+    });
+  });
+
+  it("marks WSL Python processes as likely ML/DL even with [N/A] memory", () => {
+    expect(
+      inferGpuProcessKind({
+        pid: 42,
+        processName: "/usr/bin/python3",
+        commandLine: "/home/lab/miniconda3/envs/torch/bin/python train.py",
+        usedMemoryMb: 0,
+      }),
+    ).toMatchObject({
+      isPython: true,
+      isLikelyMl: true,
+      reason: "ml_keyword",
+    });
+
+    expect(
+      inferGpuProcessKind({
+        pid: 99,
+        processName: "/usr/bin/python3",
+        commandLine: "python3 run.py",
+        usedMemoryMb: 0,
+      }),
+    ).toMatchObject({
+      isPython: true,
+      isLikelyMl: true,
+      reason: "wsl_python",
     });
   });
 });

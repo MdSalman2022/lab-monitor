@@ -24,7 +24,7 @@ export type GpuProcessInfo = {
 export type GpuProcessKind = {
   isPython: boolean;
   isLikelyMl: boolean;
-  reason: "ml_keyword" | "python_gpu_memory" | "not_ml_process";
+  reason: "ml_keyword" | "python_gpu_memory" | "wsl_python" | "not_ml_process";
 };
 
 export type GpuProcessSample = GpuProcessInfo &
@@ -169,15 +169,14 @@ export function parseNvidiaSmiComputeAppsOutput(
     }
 
     const pid = Number(parts[0]);
-    const usedMemoryMb = Number(parts[parts.length - 1]);
+    const lastPart = parts[parts.length - 1];
+    const usedMemoryMb =
+      lastPart === "[N/A]" || lastPart === "" || lastPart.toLowerCase() === "n/a"
+        ? 0
+        : Number(lastPart);
     const processName = parts.slice(1, -1).join(",").trim();
 
-    if (
-      !Number.isInteger(pid) ||
-      !processName ||
-      processName.toLowerCase().includes("insufficient permissions") ||
-      !Number.isInteger(usedMemoryMb)
-    ) {
+    if (!Number.isInteger(pid) || !processName || Number.isNaN(usedMemoryMb)) {
       continue;
     }
 
@@ -198,13 +197,22 @@ export function inferGpuProcessKind({
 }: GpuProcessInfo & { commandLine?: string | null }): GpuProcessKind {
   const processBase = basename(processName);
   const searchable = `${processName} ${commandLine ?? ""}`.toLowerCase();
+  const isWslProcess =
+    processName.includes("/") ||
+    /^wsl/.test(processBase) ||
+    searchable.includes("wsl.exe") ||
+    searchable.includes("wslhost.exe");
   const isPython =
     processBase === "python.exe" ||
     processBase === "pythonw.exe" ||
     processBase === "python" ||
     processBase === "pythonw" ||
+    processBase === "python3" ||
+    processBase === "python3.exe" ||
     searchable.includes("jupyter") ||
-    searchable.includes("ipykernel");
+    searchable.includes("ipykernel") ||
+    searchable.includes("/bin/python") ||
+    searchable.includes("/conda/envs/");
   const hasMlKeyword = appConfig.mlProcessKeywords.some((keyword) =>
     searchable.includes(keyword.toLowerCase()),
   );
@@ -215,6 +223,12 @@ export function inferGpuProcessKind({
 
   if (isPython && usedMemoryMb >= appConfig.mlProcessMinMemoryMb) {
     return { isPython, isLikelyMl: true, reason: "python_gpu_memory" };
+  }
+
+  // WSL Python processes often report [N/A] memory but should still count as ML
+  // if they appear in nvidia-smi compute apps.
+  if (isWslProcess && isPython) {
+    return { isPython, isLikelyMl: true, reason: "wsl_python" };
   }
 
   return { isPython, isLikelyMl: false, reason: "not_ml_process" };
@@ -276,6 +290,146 @@ async function readWindowsProcessInfo(pids: number[]) {
     return map;
   } catch {
     return new Map<number, { name: string | null; commandLine: string | null }>();
+  }
+}
+
+async function readWslGpuComputeAppsViaNvidiaSmi(): Promise<GpuProcessInfo[]> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  try {
+    const { stdout } = await execFileAsync(
+      "wsl.exe",
+      ["nvidia-smi", "--query-compute-apps=pid,process_name,used_gpu_memory", "--format=csv,noheader,nounits"],
+      { timeout: 8000, windowsHide: true },
+    );
+    return parseNvidiaSmiComputeAppsOutput(stdout);
+  } catch {
+    return [];
+  }
+}
+
+async function readWslProcessInfo(pids: number[]) {
+  if (process.platform !== "win32" || pids.length === 0) {
+    return new Map<number, { name: string | null; commandLine: string | null }>();
+  }
+
+  const uniquePids = [...new Set(pids)].filter(Number.isInteger);
+  try {
+    const { stdout } = await execFileAsync(
+      "wsl.exe",
+      ["ps", "aux"],
+      { timeout: 8000, windowsHide: true },
+    );
+    const map = new Map<
+      number,
+      { name: string | null; commandLine: string | null }
+    >();
+
+    for (const line of stdout.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("USER")) {
+        continue;
+      }
+
+      const columns = trimmed.split(/\s+/);
+      if (columns.length < 11) {
+        continue;
+      }
+
+      const pid = Number(columns[1]);
+      if (!uniquePids.includes(pid)) {
+        continue;
+      }
+
+      const commandLine = columns.slice(10).join(" ");
+      const name = commandLine.split(/\s+/)[0] ?? "";
+      map.set(pid, {
+        name: name.split("/").pop() || name || null,
+        commandLine: commandLine || null,
+      });
+    }
+
+    return map;
+  } catch {
+    return new Map<number, { name: string | null; commandLine: string | null }>();
+  }
+}
+
+async function sampleWslPythonProcesses(
+  now = new Date(),
+): Promise<
+  Array<{
+    pid: number;
+    processName: string;
+    commandLine: string | null;
+    usedMemoryMb: number;
+    sampledAt: Date;
+  }>
+> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  try {
+    const { stdout } = await execFileAsync(
+      "wsl.exe",
+      ["ps", "aux"],
+      { timeout: 8000, windowsHide: true },
+    );
+    const results: Array<{
+      pid: number;
+      processName: string;
+      commandLine: string | null;
+      usedMemoryMb: number;
+      sampledAt: Date;
+    }> = [];
+
+    for (const line of stdout.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith("USER")) {
+        continue;
+      }
+
+      const columns = trimmed.split(/\s+/);
+      if (columns.length < 11) {
+        continue;
+      }
+
+      const pid = Number(columns[1]);
+      const commandLine = columns.slice(10).join(" ");
+      const searchable = commandLine.toLowerCase();
+      const isPython =
+        searchable.includes("python") ||
+        searchable.includes("jupyter") ||
+        searchable.includes("ipykernel");
+      const hasMlKeyword = appConfig.mlProcessKeywords.some((keyword) =>
+        searchable.includes(keyword.toLowerCase()),
+      );
+
+      if (!isPython && !hasMlKeyword) {
+        continue;
+      }
+
+      const processName = commandLine.split(/\s+/)[0] ?? "wsl-python";
+      const usedMemoryMb =
+        typeof Number(columns[5]) === "number" && !Number.isNaN(Number(columns[5]))
+          ? Math.round(Number(columns[5]) / 1024)
+          : 0;
+
+      results.push({
+        pid,
+        processName: processName.split("/").pop() || processName,
+        commandLine,
+        usedMemoryMb,
+        sampledAt: now,
+      });
+    }
+
+    return results;
+  } catch {
+    return [];
   }
 }
 
@@ -378,29 +532,58 @@ export async function sampleGpuProcessesNow(
   db: LabScheduleManagerDatabase = getDb(),
   now = new Date(),
 ) {
-  const processes = await readGpuComputeAppsViaNvidiaSmi();
-  let processInfo: Map<number, { name: string | null; commandLine: string | null }>;
+  const [windowsProcesses, wslProcesses] = await Promise.all([
+    readGpuComputeAppsViaNvidiaSmi(),
+    readWslGpuComputeAppsViaNvidiaSmi(),
+  ]);
 
-  if (processes.length > 0) {
-    processInfo = await readWindowsProcessInfo(
-      processes.map((processInfoItem) => processInfoItem.pid),
-    );
-  } else {
-    processInfo = new Map();
+  const windowsPids = windowsProcesses.map((processInfoItem) => processInfoItem.pid);
+  const wslPids = wslProcesses.map((processInfoItem) => processInfoItem.pid);
+
+  const [windowsProcessInfo, wslProcessInfo] = await Promise.all([
+    windowsPids.length > 0 ? readWindowsProcessInfo(windowsPids) : new Map(),
+    wslPids.length > 0 ? readWslProcessInfo(wslPids) : new Map(),
+  ]);
+
+  const enriched: Array<
+    GpuProcessInfo & { commandLine: string | null; sampledAt: Date }
+  > = [];
+
+  for (const processInfoItem of windowsProcesses) {
+    const windowsInfo = windowsProcessInfo.get(processInfoItem.pid);
+    // Windows WMI may miss WSL PIDs; try WSL process list as a cross-reference.
+    const wslInfo = wslProcessInfo.get(processInfoItem.pid);
+    enriched.push({
+      ...processInfoItem,
+      processName:
+        windowsInfo?.name ?? wslInfo?.name ?? processInfoItem.processName,
+      commandLine: windowsInfo?.commandLine ?? wslInfo?.commandLine ?? null,
+      sampledAt: now,
+    });
   }
 
-  const enriched = processes.map((processInfoItem) => {
-    const windowsInfo = processInfo.get(processInfoItem.pid);
-    return {
+  // WSL nvidia-smi can report PIDs that Windows nvidia-smi does not see.
+  const seenPids = new Set(enriched.map((processInfoItem) => processInfoItem.pid));
+  for (const processInfoItem of wslProcesses) {
+    if (seenPids.has(processInfoItem.pid)) {
+      continue;
+    }
+    const wslInfo = wslProcessInfo.get(processInfoItem.pid);
+    enriched.push({
       ...processInfoItem,
-      processName: windowsInfo?.name ?? processInfoItem.processName,
-      commandLine: windowsInfo?.commandLine ?? null,
+      processName: wslInfo?.name ?? processInfoItem.processName,
+      commandLine: wslInfo?.commandLine ?? null,
       sampledAt: now,
-    };
-  });
+    });
+  }
 
   if (enriched.length === 0) {
-    const fallbackProcesses = await samplePythonProcessesFromWmi(now);
+    const [wslFallback, windowsFallback] = await Promise.all([
+      sampleWslPythonProcesses(now),
+      samplePythonProcessesFromWmi(now),
+    ]);
+
+    const fallbackProcesses = [...wslFallback, ...windowsFallback];
     if (fallbackProcesses.length > 0) {
       console.log(
         `[Lab Schedule Manager] ML/DL fallback: found ${fallbackProcesses.length} Python process(es) with ML keywords`,
@@ -427,7 +610,7 @@ async function samplePythonProcessesFromWmi(
     return [];
   }
 
-  const command = `$items = Get-CimInstance Win32_Process -Filter 'Name LIKE "%python%"' | Select-Object ProcessId,Name,CommandLine,WorkingSetSize; $items | ConvertTo-Json -Compress`;
+  const command = `$items = Get-CimInstance Win32_Process | Where-Object { $_.Name -like "*python*" -or $_.Name -like "*conda*" -or $_.Name -like "*wsl*" -or $_.CommandLine -like "*python*" -or $_.CommandLine -like "*conda*" -or $_.CommandLine -like "*wsl*" } | Select-Object ProcessId,Name,CommandLine,WorkingSetSize; $items | ConvertTo-Json -Compress`;
 
   try {
     const { stdout } = await execFileAsync(
@@ -460,11 +643,16 @@ async function samplePythonProcessesFromWmi(
       const processName = row.Name ?? "";
       const commandLine = row.CommandLine ?? "";
       const searchable = `${processName} ${commandLine}`.toLowerCase();
+      const isPythonLike =
+        searchable.includes("python") ||
+        searchable.includes("conda") ||
+        searchable.includes("jupyter") ||
+        searchable.includes("ipykernel");
       const hasMlKeyword = appConfig.mlProcessKeywords.some((keyword) =>
         searchable.includes(keyword.toLowerCase()),
       );
 
-      if (!hasMlKeyword) {
+      if (!isPythonLike && !hasMlKeyword) {
         continue;
       }
 
