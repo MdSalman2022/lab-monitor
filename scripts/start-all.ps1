@@ -12,12 +12,22 @@ function Write-Log {
   "$time $Message" | Out-File (Join-Path $logDir "startup.log") -Append
 }
 
-# Resolve npm path
+# Resolve node/npm paths even if they are not on the system PATH
+$nodePath = (Get-Command node -ErrorAction SilentlyContinue).Source
 $npmPath = (Get-Command npm -ErrorAction SilentlyContinue).Source
+$defaultNodeDir = "C:\Program Files\nodejs"
+if (-not $nodePath -and (Test-Path (Join-Path $defaultNodeDir "node.exe"))) {
+  $nodePath = Join-Path $defaultNodeDir "node.exe"
+}
+if (-not $npmPath -and (Test-Path (Join-Path $defaultNodeDir "npm.cmd"))) {
+  $npmPath = Join-Path $defaultNodeDir "npm.cmd"
+}
+if (-not $nodePath) { $nodePath = "node" }
 if (-not $npmPath) { $npmPath = "npm" }
 
 Write-Log "Starting Lab Manager..."
 Write-Log "Project dir: $ProjectDir"
+Write-Log "node path: $nodePath"
 Write-Log "npm path: $npmPath"
 
 # 1. Start Next.js server
@@ -25,7 +35,7 @@ $webOutLog = Join-Path $logDir "web.log"
 $webErrLog = Join-Path $logDir "web-error.log"
 $standalonePath = Join-Path $ProjectDir ".next\standalone\server.js"
 if (Test-Path $standalonePath) {
-  $webProcess = Start-Process -FilePath "node" -ArgumentList "`"$standalonePath`"" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $webOutLog -RedirectStandardError $webErrLog
+  $webProcess = Start-Process -FilePath $nodePath -ArgumentList "`"$standalonePath`"" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $webOutLog -RedirectStandardError $webErrLog
   Write-Log "Next.js standalone server started (PID: $($webProcess.Id))"
 } else {
   $webProcess = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$npmPath`" run start" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $webOutLog -RedirectStandardError $webErrLog
@@ -35,7 +45,7 @@ if (Test-Path $standalonePath) {
 # 2. Start worker
 $workerOutLog = Join-Path $logDir "worker.log"
 $workerErrLog = Join-Path $logDir "worker-error.log"
-$workerProcess = Start-Process -FilePath "node" -ArgumentList "dist-worker/src/worker/index.js" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $workerOutLog -RedirectStandardError $workerErrLog
+$workerProcess = Start-Process -FilePath $nodePath -ArgumentList "dist-worker/src/worker/index.js" -WorkingDirectory $ProjectDir -WindowStyle Hidden -PassThru -RedirectStandardOutput $workerOutLog -RedirectStandardError $workerErrLog
 Write-Log "Worker started (PID: $($workerProcess.Id))"
 
 # Wait for web server to be ready
