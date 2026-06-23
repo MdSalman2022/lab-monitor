@@ -90,10 +90,11 @@ describe("parseNvidiaSmiComputeAppsOutput", () => {
     ).toEqual([]);
   });
 
-  it("rejects malformed compute process rows", () => {
-    expect(() => parseNvidiaSmiComputeAppsOutput("python.exe, nope")).toThrow(
-      "Could not parse nvidia-smi compute process output",
-    );
+  it("skips malformed compute process rows gracefully", () => {
+    expect(parseNvidiaSmiComputeAppsOutput("python.exe, nope")).toEqual([]);
+    expect(
+      parseNvidiaSmiComputeAppsOutput("1300, [Insufficient Permissions], [N/A]"),
+    ).toEqual([]);
   });
 });
 

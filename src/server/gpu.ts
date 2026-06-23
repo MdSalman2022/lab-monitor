@@ -160,12 +160,12 @@ export function parseNvidiaSmiComputeAppsOutput(
     .filter(Boolean)
     .filter((line) => !line.toLowerCase().includes("no running processes"));
 
-  return lines.map((line) => {
+  const results: GpuProcessInfo[] = [];
+
+  for (const line of lines) {
     const parts = line.split(",").map((part) => part.trim());
     if (parts.length < 3) {
-      throw validationError(
-        `Could not parse nvidia-smi compute process output: ${line}`,
-      );
+      continue;
     }
 
     const pid = Number(parts[0]);
@@ -175,15 +175,16 @@ export function parseNvidiaSmiComputeAppsOutput(
     if (
       !Number.isInteger(pid) ||
       !processName ||
+      processName.toLowerCase().includes("insufficient permissions") ||
       !Number.isInteger(usedMemoryMb)
     ) {
-      throw validationError(
-        `Could not parse nvidia-smi compute process output: ${line}`,
-      );
+      continue;
     }
 
-    return { pid, processName, usedMemoryMb };
-  });
+    results.push({ pid, processName, usedMemoryMb });
+  }
+
+  return results;
 }
 
 function basename(value: string) {
@@ -378,9 +379,16 @@ export async function sampleGpuProcessesNow(
   now = new Date(),
 ) {
   const processes = await readGpuComputeAppsViaNvidiaSmi();
-  const processInfo = await readWindowsProcessInfo(
-    processes.map((processInfoItem) => processInfoItem.pid),
-  );
+  let processInfo: Map<number, { name: string | null; commandLine: string | null }>;
+
+  if (processes.length > 0) {
+    processInfo = await readWindowsProcessInfo(
+      processes.map((processInfoItem) => processInfoItem.pid),
+    );
+  } else {
+    processInfo = new Map();
+  }
+
   const enriched = processes.map((processInfoItem) => {
     const windowsInfo = processInfo.get(processInfoItem.pid);
     return {
@@ -391,7 +399,93 @@ export async function sampleGpuProcessesNow(
     };
   });
 
+  if (enriched.length === 0) {
+    const fallbackProcesses = await samplePythonProcessesFromWmi(now);
+    if (fallbackProcesses.length > 0) {
+      console.log(
+        `[Lab Schedule Manager] ML/DL fallback: found ${fallbackProcesses.length} Python process(es) with ML keywords`,
+      );
+      return insertGpuProcessSamples(fallbackProcesses, db);
+    }
+  }
+
   return insertGpuProcessSamples(enriched, db);
+}
+
+async function samplePythonProcessesFromWmi(
+  now = new Date(),
+): Promise<
+  Array<{
+    pid: number;
+    processName: string;
+    commandLine: string | null;
+    usedMemoryMb: number;
+    sampledAt: Date;
+  }>
+> {
+  if (process.platform !== "win32") {
+    return [];
+  }
+
+  const command = `$items = Get-CimInstance Win32_Process -Filter 'Name LIKE "%python%"' | Select-Object ProcessId,Name,CommandLine,WorkingSetSize; $items | ConvertTo-Json -Compress`;
+
+  try {
+    const { stdout } = await execFileAsync(
+      "powershell",
+      ["-NoProfile", "-Command", command],
+      { timeout: 5000, windowsHide: true },
+    );
+
+    const parsed = JSON.parse(stdout || "[]") as Array<{
+      ProcessId?: number;
+      Name?: string | null;
+      CommandLine?: string | null;
+      WorkingSetSize?: number | null;
+    }>;
+
+    const rows = Array.isArray(parsed) ? parsed : [parsed];
+    const results: Array<{
+      pid: number;
+      processName: string;
+      commandLine: string | null;
+      usedMemoryMb: number;
+      sampledAt: Date;
+    }> = [];
+
+    for (const row of rows) {
+      if (typeof row.ProcessId !== "number") {
+        continue;
+      }
+
+      const processName = row.Name ?? "";
+      const commandLine = row.CommandLine ?? "";
+      const searchable = `${processName} ${commandLine}`.toLowerCase();
+      const hasMlKeyword = appConfig.mlProcessKeywords.some((keyword) =>
+        searchable.includes(keyword.toLowerCase()),
+      );
+
+      if (!hasMlKeyword) {
+        continue;
+      }
+
+      const usedMemoryMb =
+        typeof row.WorkingSetSize === "number"
+          ? Math.round(row.WorkingSetSize / 1024 / 1024)
+          : 0;
+
+      results.push({
+        pid: row.ProcessId,
+        processName,
+        commandLine,
+        usedMemoryMb,
+        sampledAt: now,
+      });
+    }
+
+    return results;
+  } catch {
+    return [];
+  }
 }
 
 export function getLatestGpuSample(db: LabScheduleManagerDatabase = getDb()) {
