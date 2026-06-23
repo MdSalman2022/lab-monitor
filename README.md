@@ -1,36 +1,76 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# LabBeacon
+
+LabBeacon is a local-first Next.js PWA for tracking a shared Windows GPU lab PC. It serves a dashboard, stores sessions in SQLite, polls `nvidia-smi` from a separate Node worker, and sends Telegram alerts when a scheduled or active slot goes idle.
 
 ## Getting Started
 
-First, run the development server:
+Create local configuration:
+
+```bash
+copy .env.example .env.local
+npm run db:init
+```
+
+Run the web app and worker in separate terminals:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run worker:dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.js`. The page auto-updates as you edit the file.
+## Production Build
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm run test
+npm run typecheck
+npm run lint
+npm run build
+npm run build:worker
+```
 
-## Learn More
+The Next.js server is configured with standalone output. After building, the Windows services should run:
 
-To learn more about Next.js, take a look at the following resources:
+```text
+LabBeaconWeb    -> node .next\standalone\server.js
+LabBeaconWorker -> node dist-worker\src\worker\index.js
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Install the services with NSSM after the build:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```powershell
+.\scripts\install-windows-services.ps1
+```
 
-## Deploy on Vercel
+Cloudflare Tunnel should point to `http://localhost:3000`, with Cloudflare Access protecting the URL. The visible Edge/Chrome PWA can open at Windows logon, while the web server and worker start at boot through services.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Environment
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Key variables live in `.env.local`:
+
+- `LAB_BEACON_USERS`: comma-separated list of the five users
+- `LAB_BEACON_CHECKIN_INTERVAL_MINUTES`: default `180`
+- `LAB_BEACON_GRACE_MINUTES`: default `15`
+- `LAB_BEACON_GPU_IDLE_THRESHOLD`: default `10`
+- `TELEGRAM_DRY_RUN`: default `true`
+- `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`: required for real alerts
+
+## Project Shape
+
+```text
+src/app        Next.js App Router pages and API routes
+src/components PWA dashboard UI
+src/server     SQLite, session rules, schedule, GPU, Telegram
+src/worker     background monitor
+scripts        DB and Windows service helpers
+data           local SQLite runtime data
+```
+
+## References
+
+- Installation: https://nextjs.org/docs/app/getting-started/installation.md
+- PWA guide: https://nextjs.org/docs/app/guides/progressive-web-apps
+- Route Handlers: https://nextjs.org/docs/app/getting-started/route-handlers
+- Standalone output: https://nextjs.org/docs/app/api-reference/config/next-config-js/output
+# lab-monitor
